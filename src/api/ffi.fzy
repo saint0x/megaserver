@@ -6,9 +6,24 @@ fn schema_version() -> i32 {
     return 1
 }
 
+fn dispatch_error_payload(message: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("error"))
+    discard map.set(payload, "message", json.str(message))
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    return json.object(payload)
+}
+
 fn abi_dispatch(raw: str) -> i32 {
-    discard fs.write_file(model.control.host_input_path(), raw)
-    discard fs.write_file(model.control.host_output_path(), "")
+    let input_path = model.control.host_input_path()
+    let output_path = model.control.host_output_path()
+    if fs.write_file(input_path, raw) != 0 {
+        discard fs.write_file(output_path, dispatch_error_payload("host control input write failed"))
+        return 31
+    }
+    if fs.write_file(output_path, "") != 0 {
+        return 32
+    }
     return safe_dispatch()
 }
 

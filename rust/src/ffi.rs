@@ -105,11 +105,10 @@ pub fn dispatch_control(payload: &Value) -> Result<Value> {
         unsafe {
             env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
             env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
-            env::set_var("MEGASERVER_FZY_HOST_INPUT", &host_input);
-            env::set_var("MEGASERVER_FZY_HOST_OUTPUT", &host_output);
         }
         fs::write(&control_input, input).context("write Fzy control input")?;
         let _ = fs::remove_file(&control_output);
+        let _ = fs::remove_file(&host_input);
         let _ = fs::remove_file(&host_output);
         let code = unsafe { megaserver_fzy_dispatch_control() };
         let output = fs::read_to_string(&control_output).unwrap_or_default();
@@ -136,5 +135,70 @@ pub fn last_error_message() -> String {
             return String::new();
         }
         std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{self, StatePaths};
+    use crate::test_support::INTEGRATION_LOCK;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[test]
+    fn nested_host_dispatch_uses_control_scratch_siblings_without_host_env() {
+        let _guard = INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let temp = TempDir::new().expect("tempdir");
+        let paths = StatePaths::resolve(Some(temp.path().join("home"))).expect("state paths");
+        state::init(&paths).expect("state init");
+
+        let control_input = temp.path().join("megaserver.fzy.control.input.json");
+        let control_output = temp.path().join("megaserver.fzy.control.output.json");
+        let host_input = temp.path().join("megaserver.fzy.host.input.json");
+        let host_output = temp.path().join("megaserver.fzy.host.output.json");
+        let payload = json!({
+            "home": paths.home.display().to_string(),
+            "action": "health"
+        })
+        .to_string();
+
+        with_fzy_runtime(|| {
+            std::fs::create_dir_all(temp.path()).expect("scratch dir");
+            unsafe {
+                env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
+                env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
+                env::remove_var("MEGASERVER_FZY_HOST_INPUT");
+                env::remove_var("MEGASERVER_FZY_HOST_OUTPUT");
+            }
+            std::fs::write(&control_input, &payload).expect("control input");
+            let _ = std::fs::remove_file(&control_output);
+            let _ = std::fs::remove_file(&host_input);
+            let _ = std::fs::remove_file(&host_output);
+
+            let code = unsafe { megaserver_fzy_dispatch_control() };
+            assert_eq!(code, 0, "control dispatch should succeed");
+        });
+
+        assert!(
+            host_input.exists(),
+            "nested host dispatch should materialize host input beside control input"
+        );
+        assert!(
+            host_output.exists(),
+            "nested host dispatch should materialize host output beside control output"
+        );
+        let host_input_text = std::fs::read_to_string(&host_input).expect("host input text");
+        assert_eq!(
+            serde_json::from_str::<Value>(&host_input_text).unwrap()["action"],
+            "health"
+        );
+        let control_output_value = serde_json::from_str::<Value>(
+            &std::fs::read_to_string(&control_output).expect("control output text"),
+        )
+        .expect("control output json");
+        assert_eq!(control_output_value["status"], "ok");
     }
 }

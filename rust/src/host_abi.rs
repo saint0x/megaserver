@@ -37,15 +37,33 @@ fn set_last_error(message: &str) {
 }
 
 fn host_input_path() -> PathBuf {
-    env::var_os("MEGASERVER_FZY_HOST_INPUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/tmp/megaserver.fzy.host.input.json"))
+    sibling_of_control_path(
+        "MEGASERVER_FZY_CONTROL_INPUT",
+        "megaserver.fzy.control.input.json",
+        "megaserver.fzy.host.input.json",
+    )
 }
 
 fn host_output_path() -> PathBuf {
-    env::var_os("MEGASERVER_FZY_HOST_OUTPUT")
+    sibling_of_control_path(
+        "MEGASERVER_FZY_CONTROL_OUTPUT",
+        "megaserver.fzy.control.output.json",
+        "megaserver.fzy.host.output.json",
+    )
+}
+
+fn sibling_of_control_path(
+    env_key: &str,
+    default_control_name: &str,
+    sibling_name: &str,
+) -> PathBuf {
+    let control_path = env::var_os(env_key)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/tmp/megaserver.fzy.host.output.json"))
+        .unwrap_or_else(|| PathBuf::from(format!("/var/tmp/{default_control_name}")));
+    control_path
+        .parent()
+        .map(|parent| parent.join(sibling_name))
+        .unwrap_or_else(|| PathBuf::from(format!("/var/tmp/{sibling_name}")))
 }
 
 fn resolve_paths(request: &Value) -> anyhow::Result<StatePaths> {

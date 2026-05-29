@@ -14,20 +14,32 @@ fn output_path() -> str {
     return "/var/tmp/megaserver.fzy.control.output.json"
 }
 
-fn host_input_path() -> str {
-    let override = env.get("MEGASERVER_FZY_HOST_INPUT")
-    if override != "" {
-        return override
+fn last_slash(path: str) -> i32 {
+    let mut idx = str.len(path) - 1
+    while idx >= 0 {
+        if str.slice(path, idx, idx + 1) == "/" {
+            return idx
+        }
+        idx -= 1
     }
-    return "/var/tmp/megaserver.fzy.host.input.json"
+    return -1
+}
+
+fn sibling_path(path: str, file_name: str) -> str {
+    let slash = last_slash(path)
+    if slash < 0 {
+        return file_name
+    }
+    let dir = str.slice(path, 0, slash + 1)
+    return str.concat(dir, file_name)
+}
+
+fn host_input_path() -> str {
+    return sibling_path(input_path(), "megaserver.fzy.host.input.json")
 }
 
 fn host_output_path() -> str {
-    let override = env.get("MEGASERVER_FZY_HOST_OUTPUT")
-    if override != "" {
-        return override
-    }
-    return "/var/tmp/megaserver.fzy.host.output.json"
+    return sibling_path(output_path(), "megaserver.fzy.host.output.json")
 }
 
 fn error_payload(message: str) -> str {
