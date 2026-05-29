@@ -1,0 +1,39 @@
+use core.time;
+
+fn input_path() -> str {
+    return "/tmp/megaserver.fzy.plan.input.json"
+}
+
+fn output_path() -> str {
+    return "/tmp/megaserver.fzy.plan.output.json"
+}
+
+fn error_payload(message: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("error"))
+    discard map.set(payload, "message", json.str(message))
+    discard map.set(payload, "planner", json.str("fzy"))
+    return json.object(payload)
+}
+
+fn ok_payload(raw: str) -> str {
+    let parsed = json.parse(raw)
+    let payload = map.new()
+    let health = json.get(parsed, "health")
+    let runtime = json.get(parsed, "runtime")
+    let network = json.get(parsed, "network")
+    let resources = json.get(parsed, "resources")
+    discard map.set(payload, "status", json.str("ok"))
+    discard map.set(payload, "planner", json.str("fzy"))
+    discard map.set(payload, "service", json.str(json.get_str(parsed, "name")))
+    discard map.set(payload, "command", json.raw(json.get_str(json.get(runtime, "command"), "raw")))
+    discard map.set(payload, "routes", json.raw(json.get_str(json.get(parsed, "routes"), "raw")))
+    discard map.set(payload, "volumes", json.raw(json.get_str(json.get(parsed, "volumes"), "raw")))
+    discard map.set(payload, "port", json.raw(json.get_str(json.get(network, "port"), "raw")))
+    discard map.set(payload, "health_path", json.str(json.get_str(health, "path")))
+    discard map.set(payload, "memory", json.str(json.get_str(resources, "memory")))
+    discard map.set(payload, "cpu", json.str(json.get_str(resources, "cpu")))
+    discard map.set(payload, "planned_at", json.str(str.from_i32(time.now())))
+    discard map.set(payload, "deterministic", json.str("true"))
+    return json.object(payload)
+}

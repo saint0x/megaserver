@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "name": "megaserver-lifecycle-pass",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": ["-lc", "pkill -f '/Users/deepsaint/Desktop/megaserver/examples/hello-service/server.py' || true; rm -rf tmp/megahome /tmp/megaserver.fzy.plan.input.json /tmp/megaserver.fzy.plan.output.json"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome init >/dev/null"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome deploy ../examples/hello-service >/dev/null"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome inspect hello-service | grep -q '\"status\": \"healthy\"'"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome logs hello-service | grep -q 'GET /health'"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome events --service hello-service | grep -q 'service.healthy'"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome stop hello-service >/dev/null"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome destroy hello-service >/dev/null"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": ["-lc", "pkill -f '/Users/deepsaint/Desktop/megaserver/examples/hello-service/server.py' || true; rm -rf tmp/megahome /tmp/megaserver.fzy.plan.input.json /tmp/megaserver.fzy.plan.output.json"],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome init >/dev/null"],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome deploy ../examples/hello-service >/dev/null"],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome inspect hello-service | grep -q '\"status\": \"healthy\"'"],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome logs hello-service | grep -q 'GET /health'"],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome events --service hello-service | grep -q 'service.healthy'"],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome stop hello-service >/dev/null"],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": ["-lc", "cd rust && cargo run --quiet -- --home ../tmp/megahome destroy hello-service >/dev/null"],
+      "expect_exit": 0
+    }
+  ]
+}

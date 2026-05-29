@@ -1,0 +1,7 @@
+mod rpc;
+mod ffi;
+
+fn touch() -> i32 {
+    discard rpc.rpc_touch()
+    return 0
+}

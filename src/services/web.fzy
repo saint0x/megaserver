@@ -1,0 +1,60 @@
+use core.fs;
+
+fn push_route(routes: ListHandle, kind: model.contracts.RouteKind, method: str, path: str, auth: str) -> i32 {
+    discard list.push(
+        routes,
+        json.raw(
+            model.types.route_json(
+                model.contracts.route_id(kind),
+                model.contracts.route_name(kind),
+                method,
+                path,
+                model.contracts.route_prefix(kind),
+                model.contracts.route_public(kind),
+                model.contracts.route_skip_rate(kind),
+                model.contracts.route_require_json(kind),
+                auth,
+            ),
+        ),
+    )
+    return 0
+}
+
+fn openapi_path() -> str {
+    return "/tmp/megaserver/openapi.json"
+}
+
+fn boot() -> i32 {
+    discard fs.mkdir("/tmp/megaserver")
+    discard fs.write_file(openapi_path(), model.types.openapi_json(routes_json()))
+    return 0
+}
+
+fn routes_json() -> str {
+    let routes = list.new()
+    discard push_route(routes, model.contracts.RouteKind::RouteHealth, "GET", "/v1/health", "public")
+    discard push_route(routes, model.contracts.RouteKind::RouteServicesList, "GET", "/v1/services", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceDeploy, "POST", "/v1/services/deploy", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceStart, "POST", "/v1/services/:service/start", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceStop, "POST", "/v1/services/:service/stop", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceRestart, "POST", "/v1/services/:service/restart", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceDestroy, "POST", "/v1/services/:service/destroy", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceInspect, "GET", "/v1/services/:service/inspect", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceLogs, "GET", "/v1/services/:service/logs", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceShell, "POST", "/v1/services/:service/shell", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceSnapshot, "POST", "/v1/services/:service/snapshot", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteServiceRollback, "POST", "/v1/services/:service/rollback/:snapshot", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteRoutesList, "GET", "/v1/routes", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteRoutesCreate, "POST", "/v1/routes", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteRoutesSign, "POST", "/v1/routes/signed-link", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteVolumesList, "GET", "/v1/volumes", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteVolumesCreate, "POST", "/v1/volumes", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteSecretsList, "GET", "/v1/secrets", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteSecretsSet, "POST", "/v1/secrets", "operator")
+    discard push_route(routes, model.contracts.RouteKind::RouteEventsList, "GET", "/v1/events", "operator")
+    return json.array(routes)
+}
+
+fn route_count() -> i32 {
+    return 20
+}

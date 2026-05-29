@@ -1,0 +1,56 @@
+fn input_path() -> str {
+    return "/tmp/megaserver.fzy.control.input.json"
+}
+
+fn output_path() -> str {
+    return "/tmp/megaserver.fzy.control.output.json"
+}
+
+fn error_payload(message: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("error"))
+    discard map.set(payload, "message", json.str(message))
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    return json.object(payload)
+}
+
+fn parsed(raw: str) -> JsonHandle {
+    return json.parse(raw)
+}
+
+fn string_field(raw: str, key: str) -> str {
+    return json.get_str(parsed(raw), key)
+}
+
+fn action(raw: str) -> str {
+    return string_field(raw, "action")
+}
+
+fn method(raw: str) -> str {
+    return string_field(raw, "method")
+}
+
+fn path(raw: str) -> str {
+    return string_field(raw, "path")
+}
+
+fn body(raw: str) -> str {
+    return string_field(raw, "body")
+}
+
+fn home(raw: str) -> str {
+    return string_field(raw, "home")
+}
+
+fn envelope_kind(raw: str) -> str {
+    let direct_action = action(raw)
+    if direct_action != "" {
+        return "action"
+    }
+    let request_method = method(raw)
+    let request_path = path(raw)
+    if request_method != "" && request_path != "" {
+        return "http"
+    }
+    return ""
+}

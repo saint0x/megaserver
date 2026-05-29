@@ -1,0 +1,96 @@
+fn ffi_export_json(symbol: str, kind: str, mode: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "symbol", json.str(symbol))
+    discard map.set(payload, "kind", json.str(kind))
+    discard map.set(payload, "mode", json.str(mode))
+    return json.object(payload)
+}
+
+fn ffi_manifest_json(abi: str, project: str, exports_json: str, rpc_manifest_path: str, openapi_path: str) -> str {
+    let manifests = map.new()
+    discard map.set(manifests, "rpc", json.str(rpc_manifest_path))
+    discard map.set(manifests, "openapi", json.str(openapi_path))
+
+    let payload = map.new()
+    discard map.set(payload, "abi", json.str(abi))
+    discard map.set(payload, "project", json.str(project))
+    discard map.set(payload, "exports", json.raw(exports_json))
+    discard map.set(payload, "manifests", json.object(manifests))
+    return json.object(payload)
+}
+
+fn rpc_manifest_json(routes_json: str, openapi_path: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("ok"))
+    discard map.set(payload, "project", json.str("megaserver"))
+    discard map.set(payload, "transport", json.str("http"))
+    discard map.set(payload, "routes", json.raw(routes_json))
+    discard map.set(payload, "openapi", json.str(openapi_path))
+    return json.object(payload)
+}
+
+fn route_json(route_id: i32, name: str, method: str, path: str, prefix: str, public_route: i32, skip_rate: i32, require_json: i32, auth: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "route_id", json.raw(str.from_i32(route_id)))
+    discard map.set(payload, "name", json.str(name))
+    discard map.set(payload, "method", json.str(method))
+    discard map.set(payload, "path", json.str(path))
+    discard map.set(payload, "prefix", json.str(prefix))
+    discard map.set(payload, "public", if public_route == 1 { json.raw("true") } else { json.raw("false") })
+    discard map.set(payload, "skip_rate", if skip_rate == 1 { json.raw("true") } else { json.raw("false") })
+    discard map.set(payload, "require_json", if require_json == 1 { json.raw("true") } else { json.raw("false") })
+    discard map.set(payload, "auth", json.str(auth))
+    return json.object(payload)
+}
+
+fn control_ok_json(action: str, payload_json: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("ok"))
+    discard map.set(payload, "action", json.str(action))
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    discard map.set(payload, "payload", json.raw(payload_json))
+    return json.object(payload)
+}
+
+fn control_error_json(action: str, message: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("error"))
+    discard map.set(payload, "action", json.str(action))
+    discard map.set(payload, "message", json.str(message))
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    return json.object(payload)
+}
+
+fn request_error_json(err: model.request.RequestError) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("error"))
+    discard map.set(payload, "http_status", json.raw(str.from_i32(err.status)))
+    discard map.set(payload, "code", json.str(err.code))
+    discard map.set(payload, "message", json.str(err.message))
+    discard map.set(payload, "details", json.str(err.details))
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    return json.object(payload)
+}
+
+fn platform_health_json(route_count: i32, planner_version: i32) -> str {
+    let payload = map.new()
+    discard map.set(payload, "service", json.str("megaserver"))
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    discard map.set(payload, "route_count", json.raw(str.from_i32(route_count)))
+    discard map.set(payload, "planner_schema_version", json.raw(str.from_i32(planner_version)))
+    discard map.set(payload, "status", json.str("ok"))
+    return json.object(payload)
+}
+
+fn openapi_json(routes_json: str) -> str {
+    let info = map.new()
+    discard map.set(info, "title", json.str("megaserver"))
+    discard map.set(info, "version", json.str("0.1"))
+
+    let payload = map.new()
+    discard map.set(payload, "openapi", json.str("3.1.0"))
+    discard map.set(payload, "framework", json.str("fzweb-inspired"))
+    discard map.set(payload, "info", json.object(info))
+    discard map.set(payload, "routes", json.raw(routes_json))
+    return json.object(payload)
+}

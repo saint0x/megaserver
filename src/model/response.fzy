@@ -1,0 +1,68 @@
+struct ApiError {
+    status: i32,
+    code: str,
+    message: str,
+    details: str,
+}
+
+struct ResponsePlan {
+    status: i32,
+    content_type: str,
+    body: str,
+    close: i32,
+}
+
+fn plan(status: i32, content_type: str, body: str) -> ResponsePlan {
+    return ResponsePlan {
+        status: status,
+        content_type: content_type,
+        body: body,
+        close: 1,
+    }
+}
+
+fn text(status: i32, body: str) -> ResponsePlan {
+    return plan(status, "text/plain; charset=utf-8", body)
+}
+
+fn json_plan(status: i32, body: str) -> ResponsePlan {
+    return plan(status, "application/json; charset=utf-8", body)
+}
+
+fn accepted_json(body: str) -> ResponsePlan {
+    return json_plan(202, body)
+}
+
+fn api_error(status: i32, code: str, message: str, details: str) -> ApiError {
+    return ApiError {
+        status: status,
+        code: code,
+        message: message,
+        details: details,
+    }
+}
+
+fn request_error(err: model.request.RequestError) -> ApiError {
+    return api_error(err.status, err.code, err.message, err.details)
+}
+
+fn error_body(err: ApiError) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("error"))
+    discard map.set(payload, "http_status", json.raw(str.from_i32(err.status)))
+    discard map.set(payload, "code", json.str(err.code))
+    discard map.set(payload, "message", json.str(err.message))
+    if err.details != "" {
+        discard map.set(payload, "details", json.str(err.details))
+    }
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    return json.object(payload)
+}
+
+fn error_plan(err: ApiError) -> ResponsePlan {
+    return json_plan(err.status, error_body(err))
+}
+
+fn emit_body(out: ResponsePlan) -> str {
+    return out.body
+}

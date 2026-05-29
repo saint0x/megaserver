@@ -1,0 +1,11 @@
+use core.fs;
+
+fn dispatch() -> i32 {
+    let raw = fs.read_file(model.planner.input_path())
+    if raw == "" {
+        discard fs.write_file(model.planner.output_path(), model.planner.error_payload("planner input missing"))
+        return 12
+    }
+    discard fs.write_file(model.planner.output_path(), model.planner.ok_payload(raw))
+    return 0
+}

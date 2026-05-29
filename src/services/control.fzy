@@ -1,0 +1,48 @@
+use core.fs;
+
+fn normalized_request(raw: str) -> str {
+    let kind = model.control.envelope_kind(raw)
+    if kind == "action" {
+        return raw
+    }
+    if kind == "http" {
+        return services.http.route_json(
+            model.control.method(raw),
+            model.control.path(raw),
+            model.control.body(raw),
+            model.control.home(raw),
+        )
+    }
+    return model.control.error_payload("control request must contain either `action` or `method`+`path`")
+}
+
+fn normalization_failed(raw: str) -> i32 {
+    let parsed = json.parse(raw)
+    if json.get_str(parsed, "status") == "error" {
+        return 1
+    }
+    return 0
+}
+
+fn dispatch_host() -> i32 {
+    requires true
+    let raw = fs.read_file(model.control.input_path())
+    if raw == "" {
+        discard fs.write_file(model.control.output_path(), model.control.error_payload("control input missing"))
+        return 12
+    }
+    let normalized = normalized_request(raw)
+    if normalization_failed(normalized) == 1 {
+        discard fs.write_file(model.control.output_path(), normalized)
+        return 22
+    }
+    let code = api.ffi.host_dispatch(normalized)
+    if code != 0 {
+        let output = fs.read_file(model.control.output_path())
+        if output == "" {
+            discard fs.write_file(model.control.output_path(), model.control.error_payload("host control dispatch failed"))
+        }
+    }
+    ensures true
+    return code
+}

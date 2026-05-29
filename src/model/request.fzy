@@ -1,0 +1,110 @@
+struct RequestContext {
+    route_id: i32,
+    route_name: str,
+    route_path: str,
+    route_prefix: str,
+}
+
+struct RequestError {
+    status: i32,
+    code: str,
+    message: str,
+    details: str,
+}
+
+struct TextResult {
+    ok: i32,
+    value: str,
+    err: RequestError,
+}
+
+struct JsonResult {
+    ok: i32,
+    payload: JsonHandle,
+    raw: str,
+    err: RequestError,
+}
+
+fn context(kind: model.contracts.RouteKind, route_path: str) -> RequestContext {
+    return RequestContext {
+        route_id: model.contracts.route_id(kind),
+        route_name: model.contracts.route_name(kind),
+        route_path: route_path,
+        route_prefix: model.contracts.route_prefix(kind),
+    }
+}
+
+fn no_error() -> RequestError {
+    return RequestError {
+        status: 0,
+        code: "",
+        message: "",
+        details: "",
+    }
+}
+
+fn error(status: i32, code: str, message: str, details: str) -> RequestError {
+    return RequestError {
+        status: status,
+        code: code,
+        message: message,
+        details: details,
+    }
+}
+
+fn text_ok(value: str) -> TextResult {
+    return TextResult {
+        ok: 1,
+        value: value,
+        err: no_error(),
+    }
+}
+
+fn text_err(status: i32, code: str, message: str, details: str) -> TextResult {
+    return TextResult {
+        ok: 0,
+        value: "",
+        err: error(status, code, message, details),
+    }
+}
+
+fn json_ok(payload: JsonHandle, raw: str) -> JsonResult {
+    return JsonResult {
+        ok: 1,
+        payload: payload,
+        raw: raw,
+        err: no_error(),
+    }
+}
+
+fn json_err(status: i32, code: str, message: str, details: str) -> JsonResult {
+    return JsonResult {
+        ok: 0,
+        payload: json.parse("{}"),
+        raw: "",
+        err: error(status, code, message, details),
+    }
+}
+
+fn parse_json_required(body_json: str, route_name: str) -> JsonResult {
+    if str.trim(body_json) == "" {
+        return json_err(400, "missing_body", "request body is required", route_name)
+    }
+    return json_ok(json.parse(body_json), body_json)
+}
+
+fn json_required_str(payload: JsonHandle, key: str, route_name: str) -> TextResult {
+    let value = json.get_str(payload, key)
+    if str.trim(value) == "" {
+        return text_err(400, "missing_field", str.concat("missing required field `", str.concat(key, "`")), route_name)
+    }
+    return text_ok(value)
+}
+
+fn json_optional_str(payload: JsonHandle, key: str) -> str {
+    return json.get_str(payload, key)
+}
+
+fn json_optional_raw(payload: JsonHandle, key: str) -> str {
+    return json.get_str(json.get(payload, key), "raw")
+}

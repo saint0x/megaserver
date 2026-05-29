@@ -1,0 +1,12 @@
+{
+  "dependencyGraphHash": "0f475d229f5de6983436c32a663f8fddf5b2b68c41f4b735513813d28040464d",
+  "graph": {
+    "deps": [],
+    "package": {
+      "manifestHash": "be623ed49078b73043d8ee3e9427b6ea3518e1e3698e54650311aeba9d6224df",
+      "name": "megaserver",
+      "version": "0.1.0"
+    }
+  },
+  "schemaVersion": "fozzylang.lock.v0"
+}

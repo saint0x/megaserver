@@ -1,0 +1,15 @@
+ext unsafe c fn megaserver_host_dispatch(ptr_borrowed: *u8, len: usize) -> i32;
+
+fn schema_version() -> i32 {
+    return 1
+}
+
+fn abi_dispatch(raw: str) -> i32 {
+    unsafe {
+        return megaserver_host_dispatch(raw, str.len(raw))
+    }
+}
+
+fn host_dispatch(raw: str) -> i32 {
+    return abi_dispatch(raw)
+}

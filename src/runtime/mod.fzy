@@ -1,0 +1,4 @@
+fn boot() -> i32 {
+    discard model.preflight()
+    return services.boot()
+}

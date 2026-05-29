@@ -1,0 +1,10 @@
+use core.fs;
+
+fn rpc_manifest_path() -> str {
+    return "/tmp/megaserver/api.rpc.json"
+}
+
+fn rpc_touch() -> i32 {
+    discard fs.write_file(rpc_manifest_path(), model.types.rpc_manifest_json(services.web.routes_json(), services.web.openapi_path()))
+    return 0
+}

@@ -1,0 +1,251 @@
+enum RouteKind {
+    RouteHealth,
+    RouteServicesList,
+    RouteServiceDeploy,
+    RouteServiceStart,
+    RouteServiceStop,
+    RouteServiceRestart,
+    RouteServiceDestroy,
+    RouteServiceInspect,
+    RouteServiceLogs,
+    RouteServiceShell,
+    RouteServiceSnapshot,
+    RouteServiceRollback,
+    RouteRoutesList,
+    RouteRoutesCreate,
+    RouteRoutesSign,
+    RouteVolumesList,
+    RouteVolumesCreate,
+    RouteSecretsList,
+    RouteSecretsSet,
+    RouteEventsList,
+    RouteNotFound,
+}
+
+fn route_health_id() -> i32 { return 1 }
+fn route_services_list_id() -> i32 { return 2 }
+fn route_service_deploy_id() -> i32 { return 3 }
+fn route_service_start_id() -> i32 { return 4 }
+fn route_service_stop_id() -> i32 { return 5 }
+fn route_service_restart_id() -> i32 { return 6 }
+fn route_service_destroy_id() -> i32 { return 7 }
+fn route_service_inspect_id() -> i32 { return 8 }
+fn route_service_logs_id() -> i32 { return 9 }
+fn route_service_shell_id() -> i32 { return 10 }
+fn route_service_snapshot_id() -> i32 { return 11 }
+fn route_service_rollback_id() -> i32 { return 12 }
+fn route_routes_list_id() -> i32 { return 13 }
+fn route_routes_create_id() -> i32 { return 14 }
+fn route_volumes_list_id() -> i32 { return 15 }
+fn route_volumes_create_id() -> i32 { return 16 }
+fn route_secrets_list_id() -> i32 { return 17 }
+fn route_secrets_set_id() -> i32 { return 18 }
+fn route_events_list_id() -> i32 { return 19 }
+fn route_routes_sign_id() -> i32 { return 20 }
+fn route_not_found_id() -> i32 { return 404 }
+
+fn route_id(kind: RouteKind) -> i32 {
+    match kind {
+        RouteKind::RouteHealth => return route_health_id(),
+        RouteKind::RouteServicesList => return route_services_list_id(),
+        RouteKind::RouteServiceDeploy => return route_service_deploy_id(),
+        RouteKind::RouteServiceStart => return route_service_start_id(),
+        RouteKind::RouteServiceStop => return route_service_stop_id(),
+        RouteKind::RouteServiceRestart => return route_service_restart_id(),
+        RouteKind::RouteServiceDestroy => return route_service_destroy_id(),
+        RouteKind::RouteServiceInspect => return route_service_inspect_id(),
+        RouteKind::RouteServiceLogs => return route_service_logs_id(),
+        RouteKind::RouteServiceShell => return route_service_shell_id(),
+        RouteKind::RouteServiceSnapshot => return route_service_snapshot_id(),
+        RouteKind::RouteServiceRollback => return route_service_rollback_id(),
+        RouteKind::RouteRoutesList => return route_routes_list_id(),
+        RouteKind::RouteRoutesCreate => return route_routes_create_id(),
+        RouteKind::RouteRoutesSign => return route_routes_sign_id(),
+        RouteKind::RouteVolumesList => return route_volumes_list_id(),
+        RouteKind::RouteVolumesCreate => return route_volumes_create_id(),
+        RouteKind::RouteSecretsList => return route_secrets_list_id(),
+        RouteKind::RouteSecretsSet => return route_secrets_set_id(),
+        RouteKind::RouteEventsList => return route_events_list_id(),
+        _ => return route_not_found_id(),
+    }
+    return route_not_found_id()
+}
+
+fn route_name(kind: RouteKind) -> str {
+    match kind {
+        RouteKind::RouteHealth => return "health",
+        RouteKind::RouteServicesList => return "services_list",
+        RouteKind::RouteServiceDeploy => return "service_deploy",
+        RouteKind::RouteServiceStart => return "service_start",
+        RouteKind::RouteServiceStop => return "service_stop",
+        RouteKind::RouteServiceRestart => return "service_restart",
+        RouteKind::RouteServiceDestroy => return "service_destroy",
+        RouteKind::RouteServiceInspect => return "service_inspect",
+        RouteKind::RouteServiceLogs => return "service_logs",
+        RouteKind::RouteServiceShell => return "service_shell",
+        RouteKind::RouteServiceSnapshot => return "service_snapshot",
+        RouteKind::RouteServiceRollback => return "service_rollback",
+        RouteKind::RouteRoutesList => return "route_list",
+        RouteKind::RouteRoutesCreate => return "route_add",
+        RouteKind::RouteRoutesSign => return "route_sign",
+        RouteKind::RouteVolumesList => return "volume_list",
+        RouteKind::RouteVolumesCreate => return "volume_create",
+        RouteKind::RouteSecretsList => return "secret_list",
+        RouteKind::RouteSecretsSet => return "secret_set",
+        RouteKind::RouteEventsList => return "event_list",
+        _ => return "not_found",
+    }
+    return "not_found"
+}
+
+fn route_prefix(kind: RouteKind) -> str {
+    match kind {
+        RouteKind::RouteHealth => return "/v1",
+        RouteKind::RouteServicesList => return "/v1/services",
+        RouteKind::RouteServiceDeploy => return "/v1/services",
+        RouteKind::RouteServiceStart => return "/v1/services",
+        RouteKind::RouteServiceStop => return "/v1/services",
+        RouteKind::RouteServiceRestart => return "/v1/services",
+        RouteKind::RouteServiceDestroy => return "/v1/services",
+        RouteKind::RouteServiceInspect => return "/v1/services",
+        RouteKind::RouteServiceLogs => return "/v1/services",
+        RouteKind::RouteServiceShell => return "/v1/services",
+        RouteKind::RouteServiceSnapshot => return "/v1/services",
+        RouteKind::RouteServiceRollback => return "/v1/services",
+        RouteKind::RouteRoutesList => return "/v1/routes",
+        RouteKind::RouteRoutesCreate => return "/v1/routes",
+        RouteKind::RouteRoutesSign => return "/v1/routes",
+        RouteKind::RouteVolumesList => return "/v1/volumes",
+        RouteKind::RouteVolumesCreate => return "/v1/volumes",
+        RouteKind::RouteSecretsList => return "/v1/secrets",
+        RouteKind::RouteSecretsSet => return "/v1/secrets",
+        RouteKind::RouteEventsList => return "/v1/events",
+        _ => return "/",
+    }
+    return "/"
+}
+
+fn route_public(kind: RouteKind) -> i32 {
+    if kind == RouteKind::RouteHealth {
+        return 1
+    }
+    return 0
+}
+
+fn route_skip_rate(kind: RouteKind) -> i32 {
+    if kind == RouteKind::RouteHealth {
+        return 1
+    }
+    return 0
+}
+
+fn route_require_json(kind: RouteKind) -> i32 {
+    if kind == RouteKind::RouteServiceDeploy || kind == RouteKind::RouteServiceShell || kind == RouteKind::RouteRoutesCreate || kind == RouteKind::RouteRoutesSign || kind == RouteKind::RouteVolumesCreate || kind == RouteKind::RouteSecretsSet {
+        return 1
+    }
+    return 0
+}
+
+fn route_kind(method: str, path: str) -> RouteKind {
+    if method == "GET" && path == "/v1/health" {
+        return RouteKind::RouteHealth
+    }
+    if method == "GET" && path == "/v1/services" {
+        return RouteKind::RouteServicesList
+    }
+    if method == "POST" && path == "/v1/services/deploy" {
+        return RouteKind::RouteServiceDeploy
+    }
+    if method == "POST" && str.ends_with(path, "/start") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceStart
+    }
+    if method == "POST" && str.ends_with(path, "/stop") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceStop
+    }
+    if method == "POST" && str.ends_with(path, "/restart") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceRestart
+    }
+    if method == "POST" && str.ends_with(path, "/destroy") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceDestroy
+    }
+    if method == "GET" && str.ends_with(path, "/inspect") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceInspect
+    }
+    if method == "GET" && str.ends_with(path, "/logs") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceLogs
+    }
+    if method == "POST" && str.ends_with(path, "/shell") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceShell
+    }
+    if method == "POST" && str.ends_with(path, "/snapshot") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceSnapshot
+    }
+    if method == "POST" && str.contains(path, "/rollback/") == 1 && str.starts_with(path, "/v1/services/") == 1 {
+        return RouteKind::RouteServiceRollback
+    }
+    if method == "GET" && path == "/v1/routes" {
+        return RouteKind::RouteRoutesList
+    }
+    if method == "POST" && path == "/v1/routes" {
+        return RouteKind::RouteRoutesCreate
+    }
+    if method == "POST" && path == "/v1/routes/signed-link" {
+        return RouteKind::RouteRoutesSign
+    }
+    if method == "GET" && path == "/v1/volumes" {
+        return RouteKind::RouteVolumesList
+    }
+    if method == "POST" && path == "/v1/volumes" {
+        return RouteKind::RouteVolumesCreate
+    }
+    if method == "GET" && path == "/v1/secrets" {
+        return RouteKind::RouteSecretsList
+    }
+    if method == "POST" && path == "/v1/secrets" {
+        return RouteKind::RouteSecretsSet
+    }
+    if method == "GET" && path == "/v1/events" {
+        return RouteKind::RouteEventsList
+    }
+    return RouteKind::RouteNotFound
+}
+
+fn service_name_from_action_path(path: str, suffix: str) -> str {
+    let prefix = "/v1/services/"
+    let prefix_len = str.len(prefix)
+    let path_len = str.len(path)
+    let suffix_len = str.len(suffix)
+    if path_len <= prefix_len + suffix_len {
+        return ""
+    }
+    let trimmed = str.slice(path, prefix_len, path_len)
+    return str.slice(trimmed, 0, str.len(trimmed) - suffix_len)
+}
+
+fn rollback_service_name(path: str) -> str {
+    let prefix = "/v1/services/"
+    let marker = "/rollback/"
+    let prefix_len = str.len(prefix)
+    let path_len = str.len(path)
+    let mut idx = prefix_len
+    while idx + str.len(marker) <= path_len {
+        if str.slice(path, idx, idx + str.len(marker)) == marker {
+            return str.slice(path, prefix_len, idx)
+        }
+        idx += 1
+    }
+    return ""
+}
+
+fn rollback_snapshot_name(path: str) -> str {
+    let marker = "/rollback/"
+    let path_len = str.len(path)
+    let mut idx = 0
+    while idx + str.len(marker) <= path_len {
+        if str.slice(path, idx, idx + str.len(marker)) == marker {
+            return str.slice(path, idx + str.len(marker), path_len)
+        }
+        idx += 1
+    }
+    return ""
+}

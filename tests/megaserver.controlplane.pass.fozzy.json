@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "megaserver-controlplane-pass",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -euo pipefail; pkill -f '/Users/deepsaint/Desktop/megaserver/examples/hello-service/server.py' || true; rm -rf tmp/megahome2 /tmp/megaserver.fzy.plan.input.json /tmp/megaserver.fzy.plan.output.json; cd rust; cargo run --quiet -- --home ../tmp/megahome2 init >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 deploy ../examples/hello-service >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 services | grep -q 'hello-service'; cargo run --quiet -- --home ../tmp/megahome2 secrets set hello-service API_KEY s3cr3t >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 secrets list --service hello-service | grep -q 'API_KEY'; cargo run --quiet -- --home ../tmp/megahome2 expose hello-service edge.local --port 18080 >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 route list --service hello-service | grep -q 'edge.local'; cargo run --quiet -- --home ../tmp/megahome2 volumes list | grep -q 'hello-data'; cargo run --quiet -- --home ../tmp/megahome2 shell hello-service python3 -c 'import os; assert os.environ[\"API_KEY\"] == \"s3cr3t\"; assert os.environ[\"MEGASERVER_SERVICE\"] == \"hello-service\"'; snap=$(cargo run --quiet -- --home ../tmp/megahome2 snapshot hello-service | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"snapshot\"])'); cargo run --quiet -- --home ../tmp/megahome2 stop hello-service >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 rollback hello-service \"$snap\" >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 inspect hello-service | grep -q '\"status\": \"healthy\"'; cargo run --quiet -- --home ../tmp/megahome2 destroy hello-service >/dev/null"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -euo pipefail; pkill -f '/Users/deepsaint/Desktop/megaserver/examples/hello-service/server.py' || true; rm -rf tmp/megahome2 /tmp/megaserver.fzy.plan.input.json /tmp/megaserver.fzy.plan.output.json; cd rust; cargo run --quiet -- --home ../tmp/megahome2 init >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 deploy ../examples/hello-service >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 services | grep -q 'hello-service'; cargo run --quiet -- --home ../tmp/megahome2 secrets set hello-service API_KEY s3cr3t >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 secrets list --service hello-service | grep -q 'API_KEY'; cargo run --quiet -- --home ../tmp/megahome2 expose hello-service edge.local --port 18080 >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 route list --service hello-service | grep -q 'edge.local'; cargo run --quiet -- --home ../tmp/megahome2 volumes list | grep -q 'hello-data'; cargo run --quiet -- --home ../tmp/megahome2 shell hello-service python3 -c 'import os; assert os.environ[\"API_KEY\"] == \"s3cr3t\"; assert os.environ[\"MEGASERVER_SERVICE\"] == \"hello-service\"'; snap=$(cargo run --quiet -- --home ../tmp/megahome2 snapshot hello-service | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"snapshot\"])'); cargo run --quiet -- --home ../tmp/megahome2 stop hello-service >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 rollback hello-service \"$snap\" >/dev/null; cargo run --quiet -- --home ../tmp/megahome2 inspect hello-service | grep -q '\"status\": \"healthy\"'; cargo run --quiet -- --home ../tmp/megahome2 destroy hello-service >/dev/null"
+      ],
+      "expect_exit": 0
+    }
+  ]
+}

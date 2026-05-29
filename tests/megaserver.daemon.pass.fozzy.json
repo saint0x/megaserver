@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "megaserver-daemon-pass",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -euo pipefail; pkill -f '/Users/deepsaint/Desktop/megaserver/examples/hello-service/server.py' || true; rm -rf tmp/megad && mkdir -p tmp/megad; cd rust; cargo run --quiet -- --home ../tmp/megad daemon --bind 127.0.0.1:7712 --ingress-bind 127.0.0.1:8092 >/tmp/megad/daemon.out 2>/tmp/megad/daemon.err & echo $! > /tmp/megad/daemon.pid; for _ in $(seq 1 50); do curl -sf http://127.0.0.1:7712/v1/health >/dev/null && break; sleep 0.2; done; curl -sf -X POST http://127.0.0.1:7712/v1/services/deploy -H 'content-type: application/json' -d '{\"app_path\":\"/Users/deepsaint/Desktop/megaserver/examples/hello-service\"}' >/dev/null; curl -sf -X POST http://127.0.0.1:7712/v1/secrets -H 'content-type: application/json' -d '{\"service\":\"hello-service\",\"key\":\"API_KEY\",\"value\":\"s3cr3t\"}' >/dev/null; curl -sf -X POST http://127.0.0.1:7712/v1/secrets -H 'content-type: application/json' -d '{\"service\":\"hello-service\",\"key\":\"MEGASERVER_SIGNING_KEY\",\"value\":\"sign-secret\"}' >/dev/null; curl -sf -X POST http://127.0.0.1:7712/v1/services/hello-service/shell -H 'content-type: application/json' -d '{\"command\":[\"python3\",\"-c\",\"import os; assert os.environ[\\\"API_KEY\\\"]==\\\"s3cr3t\\\"\"]}' | grep -q '\"status\":\"ok\"'; curl -sf http://127.0.0.1:7712/v1/routes?service=hello-service | grep -q 'hello.local'; signed=$(curl -sf -X POST http://127.0.0.1:7712/v1/routes/signed-link -H 'content-type: application/json' -d '{\"service\":\"hello-service\",\"domain\":\"hello.local\",\"path\":\"/signed/demo\",\"expires_in\":300,\"scheme\":\"http\"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"ingress_path\"])'); curl -sf -H 'Host: hello.local' \"http://127.0.0.1:8092${signed}\" | grep -q 'hello from hello-service'; curl -sf -H 'Host: hello.local' http://127.0.0.1:8092/health | grep -q '^ok$'; curl -sf -X POST http://127.0.0.1:7712/v1/services/hello-service/destroy >/dev/null; kill $(cat /tmp/megad/daemon.pid) || true; wait $(cat /tmp/megad/daemon.pid) 2>/dev/null || true"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -euo pipefail; pkill -f '/Users/deepsaint/Desktop/megaserver/examples/hello-service/server.py' || true; rm -rf tmp/megad && mkdir -p tmp/megad; cd rust; cargo run --quiet -- --home ../tmp/megad daemon --bind 127.0.0.1:7712 --ingress-bind 127.0.0.1:8092 >/tmp/megad/daemon.out 2>/tmp/megad/daemon.err & echo $! > /tmp/megad/daemon.pid; for _ in $(seq 1 50); do curl -sf http://127.0.0.1:7712/v1/health >/dev/null && break; sleep 0.2; done; curl -sf -X POST http://127.0.0.1:7712/v1/services/deploy -H 'content-type: application/json' -d '{\"app_path\":\"/Users/deepsaint/Desktop/megaserver/examples/hello-service\"}' >/dev/null; curl -sf -X POST http://127.0.0.1:7712/v1/secrets -H 'content-type: application/json' -d '{\"service\":\"hello-service\",\"key\":\"API_KEY\",\"value\":\"s3cr3t\"}' >/dev/null; curl -sf -X POST http://127.0.0.1:7712/v1/secrets -H 'content-type: application/json' -d '{\"service\":\"hello-service\",\"key\":\"MEGASERVER_SIGNING_KEY\",\"value\":\"sign-secret\"}' >/dev/null; curl -sf -X POST http://127.0.0.1:7712/v1/services/hello-service/shell -H 'content-type: application/json' -d '{\"command\":[\"python3\",\"-c\",\"import os; assert os.environ[\\\"API_KEY\\\"]==\\\"s3cr3t\\\"\"]}' | grep -q '\"status\":\"ok\"'; curl -sf http://127.0.0.1:7712/v1/routes?service=hello-service | grep -q 'hello.local'; signed=$(curl -sf -X POST http://127.0.0.1:7712/v1/routes/signed-link -H 'content-type: application/json' -d '{\"service\":\"hello-service\",\"domain\":\"hello.local\",\"path\":\"/signed/demo\",\"expires_in\":300,\"scheme\":\"http\"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"ingress_path\"])'); curl -sf -H 'Host: hello.local' \"http://127.0.0.1:8092${signed}\" | grep -q 'hello from hello-service'; curl -sf -H 'Host: hello.local' http://127.0.0.1:8092/health | grep -q '^ok$'; curl -sf -X POST http://127.0.0.1:7712/v1/services/hello-service/destroy >/dev/null; kill $(cat /tmp/megad/daemon.pid) || true; wait $(cat /tmp/megad/daemon.pid) 2>/dev/null || true"
+      ],
+      "expect_exit": 0
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+name: hello-service
+runtime:
+  command:
+    - python3
+    - server.py
+network:
+  port: 18080
+resources:
+  memory: 128mb
+  cpu: "1"
+volumes:
+  - hello-data
+routes:
+  - hello.local
+health:
+  path: /health

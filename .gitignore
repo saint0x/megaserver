@@ -1,0 +1,12 @@
+.DS_Store
+.fz/
+.fozzy/
+.megaserver/
+target/
+rust/target/
+tmp/
+*.log
+*.pid
+*.sock
+*.sqlite-shm
+*.sqlite-wal
