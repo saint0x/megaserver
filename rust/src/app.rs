@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -785,6 +785,100 @@ fn cmd_rollback(paths: &StatePaths, service: &str, snapshot: &str) -> Result<()>
     Ok(())
 }
 
+fn service_running_status(status: &str) -> bool {
+    matches!(status, "healthy" | "degraded" | "starting")
+}
+
+fn rollback_volume_names(
+    current_manifest: &ServiceManifest,
+    snapshot_manifest: &ServiceManifest,
+) -> Vec<String> {
+    let mut names = current_manifest.volumes.clone();
+    for volume in &snapshot_manifest.volumes {
+        if !names.iter().any(|existing| existing == volume) {
+            names.push(volume.clone());
+        }
+    }
+    names
+}
+
+struct RollbackBackup {
+    root: PathBuf,
+    runtime_dir: PathBuf,
+    volumes_dir: PathBuf,
+}
+
+fn capture_rollback_backup(
+    paths: &StatePaths,
+    service: &str,
+    volume_names: &[String],
+) -> Result<RollbackBackup> {
+    let backup_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let root = paths
+        .run_dir
+        .join("rollback-backups")
+        .join(service)
+        .join(backup_id.to_string());
+    let runtime_dir = root.join("runtime");
+    let volumes_dir = root.join("volumes");
+    runtime::copy_tree(&paths.service_runtime_dir(service), &runtime_dir)?;
+    for volume in volume_names {
+        runtime::copy_tree(&paths.volumes_dir.join(volume), &volumes_dir.join(volume))?;
+    }
+    Ok(RollbackBackup {
+        root,
+        runtime_dir,
+        volumes_dir,
+    })
+}
+
+fn restore_service_files(
+    paths: &StatePaths,
+    service: &str,
+    volume_names: &[String],
+    runtime_src: &Path,
+    volumes_src: &Path,
+) -> Result<()> {
+    let runtime_target = paths.service_runtime_dir(service);
+    let _ = fs::remove_dir_all(&runtime_target);
+    runtime::copy_tree(runtime_src, &runtime_target)?;
+    for volume in volume_names {
+        let target = paths.volumes_dir.join(volume);
+        let _ = fs::remove_dir_all(&target);
+        runtime::copy_tree(&volumes_src.join(volume), &target)?;
+    }
+    Ok(())
+}
+
+fn restore_service_record(
+    paths: &StatePaths,
+    service: &str,
+    record: &crate::model::ServiceRecord,
+    was_running: bool,
+) -> Result<()> {
+    let conn = state::open(paths)?;
+    let restored_status = if was_running {
+        "stopped"
+    } else {
+        record.status.as_str()
+    };
+    state::upsert_service(
+        &conn,
+        service,
+        restored_status,
+        Path::new(&record.app_path),
+        &record.manifest_json,
+        &record.plan_json,
+        record.port,
+        record.health_path.as_deref(),
+    )?;
+    state::update_service_status(&conn, service, restored_status, None)?;
+    Ok(())
+}
+
 pub fn rollback_only(paths: &StatePaths, service: &str, snapshot: &str) -> Result<()> {
     let conn = state::open(paths)?;
     let snap = state::snapshot_by_name(&conn, snapshot)?
@@ -797,40 +891,90 @@ pub fn rollback_only(paths: &StatePaths, service: &str, snapshot: &str) -> Resul
     }
     let snapshot_dir = PathBuf::from(&snap.snapshot_path);
     let manifest_raw = fs::read_to_string(snapshot_dir.join("manifest.json"))?;
-    let manifest: ServiceManifest = serde_json::from_str(&manifest_raw)?;
+    let snapshot_manifest: ServiceManifest = serde_json::from_str(&manifest_raw)?;
     let record = load_service(paths, service)?;
-    if record.pid.is_some() || matches!(record.status.as_str(), "healthy" | "degraded" | "starting")
-    {
+    let current_manifest = manifest_from_record(&record)?;
+    let volume_names = rollback_volume_names(&current_manifest, &snapshot_manifest);
+    let was_running = record.pid.is_some() || service_running_status(record.status.as_str());
+    if was_running {
         drop(conn);
         stop_only(paths, service)?;
     }
-    let conn = state::open(paths)?;
+    let backup = capture_rollback_backup(paths, service, &volume_names)?;
 
-    for volume in &manifest.volumes {
-        let target = paths.volumes_dir.join(volume);
-        let _ = fs::remove_dir_all(&target);
-        runtime::copy_tree(&snapshot_dir.join("volumes").join(volume), &target)?;
+    let rollback_result = (|| -> Result<()> {
+        restore_service_files(
+            paths,
+            service,
+            &volume_names,
+            &snapshot_dir.join("runtime"),
+            &snapshot_dir.join("volumes"),
+        )?;
+        let conn = state::open(paths)?;
+        state::upsert_service(
+            &conn,
+            service,
+            "rolled-back",
+            Path::new(&record.app_path),
+            &manifest_raw,
+            &record.plan_json,
+            snapshot_manifest.network.port,
+            snapshot_manifest.health.path.as_deref(),
+        )?;
+        state::emit_event(
+            &conn,
+            Some(service),
+            "snapshot.rollback",
+            json!({"snapshot": snapshot}),
+        )?;
+        start_only(paths, service)
+    })();
+
+    if let Err(err) = rollback_result {
+        let current = load_service(paths, service)?;
+        if current.pid.is_some() || service_running_status(current.status.as_str()) {
+            let _ = stop_only(paths, service);
+        }
+        let recovery = (|| -> Result<()> {
+            restore_service_files(
+                paths,
+                service,
+                &volume_names,
+                &backup.runtime_dir,
+                &backup.volumes_dir,
+            )?;
+            restore_service_record(paths, service, &record, was_running)?;
+            if was_running {
+                start_only(paths, service)?;
+            }
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&backup.root);
+        let conn = state::open(paths)?;
+        state::emit_event(
+            &conn,
+            Some(service),
+            "snapshot.rollback.failed",
+            json!({
+                "snapshot": snapshot,
+                "error": err.to_string(),
+                "recovery": match &recovery {
+                    Ok(()) => "restored",
+                    Err(_) => "failed",
+                }
+            }),
+        )?;
+        return match recovery {
+            Ok(()) => Err(err.context(format!(
+                "rollback `{snapshot}` failed; restored pre-rollback service state"
+            ))),
+            Err(recovery_err) => Err(err.context(format!(
+                "rollback `{snapshot}` failed and recovery failed: {recovery_err}"
+            ))),
+        };
     }
-    let runtime_target = paths.service_runtime_dir(service);
-    let _ = fs::remove_dir_all(&runtime_target);
-    runtime::copy_tree(&snapshot_dir.join("runtime"), &runtime_target)?;
-    state::upsert_service(
-        &conn,
-        service,
-        "rolled-back",
-        Path::new(&record.app_path),
-        &manifest_raw,
-        &record.plan_json,
-        manifest.network.port,
-        manifest.health.path.as_deref(),
-    )?;
-    state::emit_event(
-        &conn,
-        Some(service),
-        "snapshot.rollback",
-        json!({"snapshot": snapshot}),
-    )?;
-    start_only(paths, service)?;
+
+    let _ = fs::remove_dir_all(&backup.root);
     Ok(())
 }
 
@@ -1018,7 +1162,6 @@ mod tests {
     use crate::controlplane;
     use crate::state;
     use crate::test_support::TEST_LOCK;
-    #[cfg(target_os = "linux")]
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
@@ -1438,11 +1581,74 @@ mod tests {
 
         destroy_only(&paths, "hello-service").unwrap();
     }
+
+    #[test]
+    fn rollback_failure_restores_pre_rollback_state_and_recovers_service() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("rollback-recovery-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let app = write_test_service_app_with_volumes(
+            temp.path(),
+            "rollback-service",
+            18082,
+            "rollback.local",
+            &["state-data"],
+        );
+
+        deploy_and_start_only(&paths, &app).unwrap();
+
+        let volume_state = paths.volumes_dir.join("state-data").join("state.txt");
+        fs::write(&volume_state, "snapshot-state").unwrap();
+
+        let snapshot = snapshot_value(&paths, "rollback-service").unwrap();
+        let snapshot_name = snapshot["snapshot"].as_str().unwrap().to_string();
+
+        fs::write(&volume_state, "live-state").unwrap();
+
+        let snapshot_manifest = paths
+            .snapshots_dir
+            .join(&snapshot_name)
+            .join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&snapshot_manifest).unwrap()).unwrap();
+        manifest["runtime"]["command"] = json!(["definitely-not-a-real-command"]);
+        fs::write(
+            &snapshot_manifest,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let err = rollback_only(&paths, "rollback-service", &snapshot_name).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("restored pre-rollback service state")
+        );
+        assert_eq!(fs::read_to_string(&volume_state).unwrap(), "live-state");
+
+        let inspect = inspect_value(&paths, "rollback-service").unwrap();
+        assert_eq!(inspect["service"]["status"].as_str(), Some("healthy"));
+
+        destroy_only(&paths, "rollback-service").unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     fn write_test_service_app(
         root: &std::path::Path,
         name: &str,
         port: u16,
         domain: &str,
+    ) -> PathBuf {
+        write_test_service_app_with_volumes(root, name, port, domain, &[])
+    }
+
+    fn write_test_service_app_with_volumes(
+        root: &std::path::Path,
+        name: &str,
+        port: u16,
+        domain: &str,
+        volumes: &[&str],
     ) -> PathBuf {
         let app_dir = root.join(name);
         fs::create_dir_all(&app_dir).unwrap();
@@ -1475,7 +1681,15 @@ HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
         fs::write(
             app_dir.join("megaserver.yaml"),
             format!(
-                "name: {name}\nruntime:\n  command:\n    - python3\n    - server.py\nnetwork:\n  port: {port}\nresources:\n  memory: 64mb\n  cpu: \"1\"\nvolumes: []\nroutes:\n  - {domain}\nhealth:\n  path: /health\n"
+                "name: {name}\nruntime:\n  command:\n    - python3\n    - server.py\nnetwork:\n  port: {port}\nresources:\n  memory: 64mb\n  cpu: \"1\"\nvolumes:\n{volumes}routes:\n  - {domain}\nhealth:\n  path: /health\n",
+                volumes = if volumes.is_empty() {
+                    "  []\n".to_string()
+                } else {
+                    volumes
+                        .iter()
+                        .map(|volume| format!("  - {volume}\n"))
+                        .collect::<String>()
+                }
             ),
         )
         .unwrap();
