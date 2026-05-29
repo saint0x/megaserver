@@ -1,6 +1,6 @@
 use crate::manifest::ServiceManifest;
 use crate::sandbox;
-use crate::state::{StatePaths, now_string};
+use crate::state::StatePaths;
 use anyhow::{Context, Result, bail};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -8,7 +8,7 @@ use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,12 +25,18 @@ pub fn prepare_service_workspace(
     paths: &StatePaths,
     service_name: &str,
     app_path: &Path,
+    manifest: &ServiceManifest,
 ) -> Result<PathBuf> {
     let workspace_root = paths.service_runtime_dir(service_name).join("workspace");
     let app_snapshot = workspace_root.join("app");
     let _ = fs::remove_dir_all(&workspace_root);
     fs::create_dir_all(&app_snapshot)?;
     copy_tree(app_path, &app_snapshot)?;
+    let volume_root = app_snapshot.join(".megaserver").join("volumes");
+    for volume in &manifest.volumes {
+        fs::create_dir_all(volume_root.join(volume))
+            .with_context(|| format!("create staged volume mount {volume}"))?;
+    }
     Ok(app_snapshot)
 }
 
@@ -41,11 +47,12 @@ pub fn spawn_service(
     manifest: &ServiceManifest,
     secret_env: &[(String, String)],
     volume_env: &[(String, String)],
+    volume_mounts: &[(PathBuf, PathBuf)],
     sandbox_env: &[(String, String)],
 ) -> Result<SpawnedService> {
     let logs_dir = paths.service_logs_dir(service_name);
     let runtime_dir = paths.service_runtime_dir(service_name);
-    let workspace_app = prepare_service_workspace(paths, service_name, app_path)?;
+    let workspace_app = prepare_service_workspace(paths, service_name, app_path, manifest)?;
     fs::create_dir_all(&logs_dir)?;
     fs::create_dir_all(&runtime_dir)?;
 
@@ -60,38 +67,20 @@ pub fn spawn_service(
         .append(true)
         .open(&stderr_log)?;
 
-    let mut command = Command::new(&manifest.runtime.command[0]);
-    if manifest.runtime.command.len() > 1 {
-        command.args(&manifest.runtime.command[1..]);
-    }
-    command.current_dir(app_path);
+    let (mut command, sandbox) = sandbox::build_service_command(
+        service_name,
+        app_path,
+        &runtime_dir,
+        manifest,
+        &workspace_app,
+        secret_env,
+        volume_env,
+        volume_mounts,
+        sandbox_env,
+    )?;
     command.stdin(Stdio::null());
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
-    command.env("MEGASERVER_SERVICE", service_name);
-    command.env("MEGASERVER_STARTED_AT", now_string());
-    if let Some(port) = manifest.network.port {
-        command.env("PORT", port.to_string());
-        command.env("MEGASERVER_PORT", port.to_string());
-    }
-    for (key, value) in secret_env {
-        command.env(key, value);
-    }
-    for (key, value) in volume_env {
-        command.env(key, value);
-    }
-    for (key, value) in sandbox_env {
-        command.env(key, value);
-    }
-    let sandbox = sandbox::configure_command(
-        &mut command,
-        service_name,
-        app_path,
-        &workspace_app,
-        &runtime_dir,
-        manifest,
-        sandbox_env,
-    )?;
     let child = command.spawn().with_context(|| {
         format!(
             "failed to spawn `{}` for service `{service_name}`",
@@ -230,8 +219,17 @@ mod tests {
         fs::create_dir_all(app.join("nested")).unwrap();
         fs::write(app.join("server.py"), "print('ok')\n").unwrap();
         fs::write(app.join("nested").join("config.txt"), "hello\n").unwrap();
+        let manifest = crate::manifest::ServiceManifest {
+            name: "demo".to_string(),
+            runtime: Default::default(),
+            network: Default::default(),
+            resources: Default::default(),
+            volumes: vec!["data".to_string()],
+            routes: vec![],
+            health: Default::default(),
+        };
 
-        let staged = prepare_service_workspace(&paths, "demo", &app).unwrap();
+        let staged = prepare_service_workspace(&paths, "demo", &app, &manifest).unwrap();
 
         assert_eq!(
             fs::read_to_string(staged.join("server.py")).unwrap(),
@@ -240,6 +238,13 @@ mod tests {
         assert_eq!(
             fs::read_to_string(staged.join("nested").join("config.txt")).unwrap(),
             "hello\n"
+        );
+        assert!(
+            staged
+                .join(".megaserver")
+                .join("volumes")
+                .join("data")
+                .exists()
         );
     }
 }

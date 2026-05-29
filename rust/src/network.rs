@@ -37,6 +37,29 @@ pub mod linux {
         HostNetworkManager::new(SystemRunner).cleanup_sandbox_network(service_name)
     }
 
+    pub fn sandbox_network_present(service_name: &str) -> Result<bool> {
+        let host_veth = host_veth_name(service_name);
+        let netns = netns_name(service_name);
+        let host_exists = Command::new("ip")
+            .args(["link", "show", &host_veth])
+            .output()
+            .with_context(|| format!("inspect host veth `{host_veth}`"))?
+            .status
+            .success();
+        let netns_output = Command::new("ip")
+            .args(["netns", "list"])
+            .output()
+            .context("list network namespaces")?;
+        let netns_exists = if netns_output.status.success() {
+            String::from_utf8_lossy(&netns_output.stdout)
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(netns.as_str()))
+        } else {
+            false
+        };
+        Ok(host_exists || netns_exists)
+    }
+
     pub fn netns_name(service_name: &str) -> String {
         format!("ms-{}", short_id(service_name))
     }

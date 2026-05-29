@@ -37,6 +37,8 @@ pub enum Commands {
     Daemon(DaemonArgs),
     #[command(hide = true)]
     Dns(DnsArgs),
+    #[command(hide = true)]
+    SandboxInit(SandboxInitArgs),
 }
 
 #[derive(Debug, Args)]
@@ -165,4 +167,26 @@ pub struct DaemonArgs {
 pub struct DnsArgs {
     #[arg(long, default_value = "10.42.0.254:53")]
     pub bind: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SandboxInitArgs {
+    #[arg(long)]
+    pub hostname: String,
+    #[arg(long)]
+    pub sandbox_root: PathBuf,
+    #[arg(long)]
+    pub workspace_app: PathBuf,
+    #[arg(long)]
+    pub hosts_path: PathBuf,
+    #[arg(long)]
+    pub resolv_path: PathBuf,
+    #[arg(long)]
+    pub cgroup_path: Option<PathBuf>,
+    #[arg(long)]
+    pub app_runtime_path: PathBuf,
+    #[arg(long = "volume-mount")]
+    pub volume_mounts: Vec<String>,
+    #[arg(last = true, required = true)]
+    pub command: Vec<String>,
 }

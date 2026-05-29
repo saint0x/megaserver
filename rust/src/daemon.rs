@@ -158,6 +158,7 @@ async fn reconcile_once(state: &Arc<DaemonState>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app;
     use crate::cli::DaemonArgs;
     use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
     use reqwest::Certificate;
@@ -209,6 +210,16 @@ mod tests {
 
         let root = Certificate::from_pem(cert_pem.as_bytes()).unwrap();
         (cert_path, key_path, root)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_isolation_supported() -> bool {
+        crate::network::linux::isolation_supported()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn linux_isolation_supported() -> bool {
+        false
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -297,6 +308,46 @@ mod tests {
             .await
             .unwrap();
         assert!(shell.status().is_success());
+
+        if linux_isolation_supported() {
+            let inspect = client
+                .get(format!("http://{bind}/v1/services/hello-service/inspect"))
+                .send()
+                .await
+                .unwrap();
+            assert!(inspect.status().is_success());
+            let inspect_json: Value = inspect.json().await.unwrap();
+            assert_eq!(
+                inspect_json["sandbox"]["runtime_kind"].as_str(),
+                Some("linux-namespace")
+            );
+            assert!(
+                inspect_json["sandbox"]["isolation_mode"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("pid")
+            );
+
+            let shell = client
+                .post(format!("http://{bind}/v1/services/hello-service/shell"))
+                .json(&json!({
+                    "command": ["python3", "-c", "from pathlib import Path; import os; assert Path.cwd() == Path('/srv/app'); volume = Path('/srv/app/.megaserver/volumes/hello-data'); test_file = volume / 'daemon-marker.txt'; test_file.write_text('daemon'); assert test_file.read_text() == 'daemon'; failed = False\ntry:\n    Path('/srv/app/server.py').write_text('mutated')\nexcept OSError:\n    failed = True\nassert failed"]
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert!(shell.status().is_success());
+            assert_eq!(
+                fs::read_to_string(
+                    paths
+                        .volumes_dir
+                        .join("hello-data")
+                        .join("daemon-marker.txt")
+                )
+                .unwrap(),
+                "daemon"
+            );
+        }
 
         let ingress = client
             .get(format!("http://{ingress_bind}/health"))
@@ -502,5 +553,72 @@ mod tests {
         let _ = server.await;
         cleanup_hello_service(&repo_root);
         crate::test_support::cleanup_fzy_io_files();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_cleans_up_crashed_linux_sandbox_resources() {
+        if !linux_isolation_supported() {
+            return;
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("reconcile-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let example = repo_root.join("examples/hello-service");
+
+        app::deploy_and_start_only(&paths, &example).unwrap();
+        let conn = state::open(&paths).unwrap();
+        let service = state::service_by_name(&conn, "hello-service")
+            .unwrap()
+            .expect("service record");
+        let sandbox = state::sandbox_by_service(&conn, "hello-service")
+            .unwrap()
+            .expect("sandbox record");
+        drop(conn);
+
+        let pid = service.pid.expect("running pid");
+        assert!(crate::runtime::process_alive(pid));
+        assert!(
+            crate::network::linux::sandbox_network_present("hello-service").unwrap(),
+            "sandbox network should exist before crash"
+        );
+
+        crate::runtime::stop_pid(pid, Duration::from_secs(2)).unwrap();
+        let daemon_state = Arc::new(DaemonState {
+            paths: paths.clone(),
+        });
+        reconcile_once(&daemon_state).await.unwrap();
+
+        let conn = state::open(&paths).unwrap();
+        let service = state::service_by_name(&conn, "hello-service")
+            .unwrap()
+            .expect("service record after reconcile");
+        let sandbox_after = state::sandbox_by_service(&conn, "hello-service")
+            .unwrap()
+            .expect("sandbox record after reconcile");
+        assert_eq!(service.status, "failed");
+        assert_eq!(sandbox_after.status, "stopped");
+        assert_eq!(sandbox_after.pid, None);
+        assert_eq!(sandbox_after.cgroup_path, None);
+        drop(conn);
+
+        assert!(
+            !crate::network::linux::sandbox_network_present("hello-service").unwrap(),
+            "sandbox network should be cleaned up after reconcile"
+        );
+        if let Some(cgroup_path) = sandbox.cgroup_path {
+            assert!(
+                !std::path::Path::new(&cgroup_path).exists(),
+                "cgroup path should be removed after reconcile"
+            );
+        }
+
+        app::destroy_only(&paths, "hello-service").unwrap();
     }
 }

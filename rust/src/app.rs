@@ -48,6 +48,7 @@ pub fn run() -> Result<()> {
         Commands::Dns(args) => {
             dns::serve_forever(paths, args.bind.parse().context("invalid dns bind")?)
         }
+        Commands::SandboxInit(args) => crate::sandbox::run_sandbox_init(args),
     }
 }
 
@@ -147,6 +148,16 @@ fn service_secret_env(paths: &StatePaths, service: &str) -> Result<Vec<(String, 
         .collect())
 }
 
+#[cfg(target_os = "linux")]
+fn sandbox_filesystem_supported() -> bool {
+    crate::network::linux::isolation_supported()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sandbox_filesystem_supported() -> bool {
+    false
+}
+
 fn service_volume_env(
     paths: &StatePaths,
     service: &str,
@@ -160,9 +171,42 @@ fn service_volume_env(
             "MEGASERVER_VOLUME_{}",
             volume_name.replace('-', "_").to_ascii_uppercase()
         );
-        vars.push((key, volume.host_path));
+        let value = if sandbox_filesystem_supported() {
+            Path::new(crate::sandbox::sandbox_app_runtime_path())
+                .join(".megaserver")
+                .join("volumes")
+                .join(volume_name)
+                .display()
+                .to_string()
+        } else {
+            volume.host_path
+        };
+        vars.push((key, value));
     }
     Ok(vars)
+}
+
+fn service_volume_mounts(
+    paths: &StatePaths,
+    service: &str,
+    manifest: &ServiceManifest,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let conn = state::open(paths)?;
+    let mut mounts = Vec::new();
+    if !sandbox_filesystem_supported() {
+        return Ok(mounts);
+    }
+    for volume_name in &manifest.volumes {
+        let volume = state::ensure_volume(&conn, paths, Some(service), volume_name)?;
+        mounts.push((
+            PathBuf::from(volume.host_path),
+            Path::new(crate::sandbox::sandbox_app_runtime_path())
+                .join(".megaserver")
+                .join("volumes")
+                .join(volume_name),
+        ));
+    }
+    Ok(mounts)
 }
 
 fn sandbox_hostname(service: &str) -> String {
@@ -262,7 +306,9 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
 
     let manifest = manifest_from_record(&record)?;
     let secret_env = service_secret_env(paths, service)?;
+    let app_path = Path::new(&record.app_path);
     let volume_env = service_volume_env(paths, service, &manifest)?;
+    let volume_mounts = service_volume_mounts(paths, service, &manifest)?;
     let conn = state::open(paths)?;
     let sandbox_hostname = sandbox_hostname(service);
     let sandbox_env = sandbox_runtime_env(
@@ -288,10 +334,11 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
     let spawned = runtime::spawn_service(
         paths,
         service,
-        Path::new(&record.app_path),
+        app_path,
         &manifest,
         &secret_env,
         &volume_env,
+        &volume_mounts,
         &sandbox_env,
     )?;
     if let Err(err) = dns::ensure_running(paths) {
@@ -897,9 +944,29 @@ pub fn shell_only(paths: &StatePaths, service: &str, command: &[String]) -> Resu
         cmd.args(&program_and_args[1..]);
     }
     if let Some(sandbox) = sandbox.as_ref() {
-        crate::sandbox::configure_shell_command(&mut cmd, &sandbox.runtime_kind, sandbox.pid)?;
+        let sandbox_root = paths
+            .service_runtime_dir(service)
+            .join("sandbox")
+            .join("rootfs");
+        let shell_dir = if sandbox.runtime_kind == "linux-namespace" {
+            Some(Path::new(crate::sandbox::sandbox_app_runtime_path()))
+        } else {
+            None
+        };
+        crate::sandbox::configure_shell_command(
+            &mut cmd,
+            &sandbox.runtime_kind,
+            sandbox.pid,
+            Some(sandbox_root.as_path()),
+            shell_dir,
+        )?;
     }
-    cmd.current_dir(&record.app_path);
+    if sandbox
+        .as_ref()
+        .is_none_or(|sandbox| sandbox.runtime_kind != "linux-namespace")
+    {
+        cmd.current_dir(&record.app_path);
+    }
     cmd.env("MEGASERVER_SERVICE", service);
     if let Some(port) = manifest.network.port {
         cmd.env("PORT", port.to_string());
@@ -1115,6 +1182,121 @@ mod tests {
 
         destroy_only(&paths, "beta-service").unwrap();
         destroy_only(&paths, "alpha-service").unwrap();
+    }
+
+    #[test]
+    fn linux_shell_enters_sandbox_rootfs_and_volume_mounts() {
+        #[cfg(not(target_os = "linux"))]
+        return;
+
+        #[cfg(target_os = "linux")]
+        if !crate::network::linux::isolation_supported() {
+            return;
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("linux-shell-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let example = repo_root.join("examples/hello-service");
+
+        deploy_and_start_only(&paths, &example).unwrap();
+
+        shell_only(
+            &paths,
+            "hello-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "from pathlib import Path; import os; assert Path.cwd() == Path('/srv/app'); volume = Path('/srv/app/.megaserver/volumes/hello-data'); assert volume.is_dir(); marker = volume / 'marker.txt'; marker.write_text('ok'); assert marker.read_text() == 'ok'; app_file = Path('/srv/app/server.py'); original = app_file.read_text(); failed = False\ntry:\n    app_file.write_text('mutated')\nexcept OSError:\n    failed = True\nassert failed, 'app mount should be read-only'\nassert app_file.read_text() == original".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let marker = paths.volumes_dir.join("hello-data").join("marker.txt");
+        assert_eq!(fs::read_to_string(marker).unwrap(), "ok");
+
+        destroy_only(&paths, "hello-service").unwrap();
+    }
+
+    #[test]
+    fn linux_snapshot_and_rollback_restore_active_sandbox_volume_state() {
+        #[cfg(not(target_os = "linux"))]
+        return;
+
+        #[cfg(target_os = "linux")]
+        if !crate::network::linux::isolation_supported() {
+            return;
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("linux-rollback-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let example = repo_root.join("examples/hello-service");
+
+        deploy_and_start_only(&paths, &example).unwrap();
+
+        shell_only(
+            &paths,
+            "hello-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "from pathlib import Path; target = Path('/srv/app/.megaserver/volumes/hello-data/state.txt'); target.write_text('snapshot-state'); assert target.read_text() == 'snapshot-state'".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let snapshot = snapshot_value(&paths, "hello-service").unwrap();
+        let snapshot_name = snapshot["snapshot"].as_str().unwrap().to_string();
+
+        shell_only(
+            &paths,
+            "hello-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "from pathlib import Path; target = Path('/srv/app/.megaserver/volumes/hello-data/state.txt'); target.write_text('mutated-state'); assert target.read_text() == 'mutated-state'".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(paths.volumes_dir.join("hello-data").join("state.txt")).unwrap(),
+            "mutated-state"
+        );
+
+        rollback_only(&paths, "hello-service", &snapshot_name).unwrap();
+
+        shell_only(
+            &paths,
+            "hello-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "from pathlib import Path; target = Path('/srv/app/.megaserver/volumes/hello-data/state.txt'); assert target.read_text() == 'snapshot-state'".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(paths.volumes_dir.join("hello-data").join("state.txt")).unwrap(),
+            "snapshot-state"
+        );
+
+        let inspect = inspect_value(&paths, "hello-service").unwrap();
+        assert_eq!(inspect["service"]["status"].as_str(), Some("healthy"));
+
+        destroy_only(&paths, "hello-service").unwrap();
     }
 
     fn write_test_service_app(
