@@ -9,152 +9,95 @@ fn find_tab_index(text: str) -> i32 {
     return -1
 }
 
-fn query_start(path: str) -> i32 {
-    let mut idx = 0
-    while idx < str.len(path) {
-        if str.slice(path, idx, idx + 1) == "?" {
-            return idx
-        }
-        idx += 1
-    }
-    return -1
+fn request_error_plan(err: fzweb.request.RequestError) -> fzweb.response.ResponsePlan {
+    return fzweb.response.error_plan(fzweb.response.request_error(err))
 }
 
-fn route_path(path: str) -> str {
-    let idx = query_start(path)
-    if idx < 0 {
-        return path
-    }
-    return str.slice(path, 0, idx)
+fn http_response_json(status: i32, content_type: str, body: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("ok"))
+    discard map.set(payload, "http_status", json.raw(str.from_i32(status)))
+    discard map.set(payload, "http_status_text", json.str(str.from_i32(status)))
+    discard map.set(payload, "content_type", json.str(content_type))
+    discard map.set(payload, "body", json.str(body))
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    return json.object(payload)
 }
 
-fn query_value(path: str, key: str) -> str {
-    let start = query_start(path)
-    if start < 0 || start + 1 >= str.len(path) {
-        return ""
-    }
-    let marker = str.concat(key, "=")
-    let query = str.slice(path, start + 1, str.len(path))
-    let mut idx = 0
-    while idx < str.len(query) {
-        let next = idx + str.len(marker)
-        if next <= str.len(query) && str.slice(query, idx, next) == marker {
-            let value_start = next
-            let mut value_end = value_start
-            while value_end < str.len(query) {
-                if str.slice(query, value_end, value_end + 1) == "&" {
-                    return str.slice(query, value_start, value_end)
-                }
-                value_end += 1
-            }
-            return str.slice(query, value_start, str.len(query))
-        }
-        while idx < str.len(query) && str.slice(query, idx, idx + 1) != "&" {
-            idx += 1
-        }
-        if idx < str.len(query) && str.slice(query, idx, idx + 1) == "&" {
-            idx += 1
-        }
-    }
-    return ""
+fn route_json(
+    method: str,
+    path: str,
+    body_json: str,
+    home: str,
+    content_type: str,
+    accept: str,
+    authorization: str,
+) -> str {
+    return dispatch_json(method, path, body_json, home, content_type, accept, authorization)
 }
 
-fn digit_value(ch: str) -> i32 {
-    if ch == "0" {
-        return 0
+fn route_plan(
+    method: str,
+    path: str,
+    body_json: str,
+    home: str,
+    content_type: str,
+    accept: str,
+    authorization: str,
+) -> fzweb.response.ResponsePlan {
+    let web = services.web.app()
+    let req = fzweb.request.control_request(method, path, body_json, home, content_type, accept, authorization)
+    let decision = fzweb.app.select(web, req.method, req.route_path)
+    if decision.route_id == fzweb.app.route_not_found_id() {
+        return fzweb.response.error_plan(fzweb.response.api_error(404, "route_not_found", str.concat("route not found for ", path), req.route_path))
     }
-    if ch == "1" {
-        return 1
+    if decision.method_allowed == 0 {
+        return fzweb.response.error_plan(fzweb.response.api_error(405, "method_not_allowed", "method not allowed", decision.route_name))
     }
-    if ch == "2" {
-        return 2
+    let gate = fzweb.middleware.before_dispatch(req, web, decision, services.web.policy(), fzweb.middleware.rate_init(services.web.policy()))
+    if gate.handled == 1 {
+        return fzweb.response.error_plan(fzweb.response.api_error(gate.status, gate.reason, gate.reason, decision.route_name))
     }
-    if ch == "3" {
-        return 3
+
+    let ctx = fzweb.request.context(decision, req)
+    let route = model.contracts.route_by_id(decision.route_id)
+    match route {
+        model.contracts.RouteKind::RouteHealth => return handle_health(ctx, req.home),
+        model.contracts.RouteKind::RouteServicesList => return handle_services_list(ctx, req.home),
+        model.contracts.RouteKind::RouteServiceDeploy => return handle_service_deploy(ctx, req.body, req.home),
+        model.contracts.RouteKind::RouteServiceStart => return handle_service_start(ctx, decision, req.home),
+        model.contracts.RouteKind::RouteServiceStop => return handle_service_stop(ctx, decision, req.home),
+        model.contracts.RouteKind::RouteServiceRestart => return handle_service_restart(ctx, decision, req.home),
+        model.contracts.RouteKind::RouteServiceDestroy => return handle_service_destroy(ctx, decision, req.home),
+        model.contracts.RouteKind::RouteServiceInspect => return handle_service_inspect(ctx, decision, req.home),
+        model.contracts.RouteKind::RouteServiceLogs => return handle_service_logs(ctx, decision, req, req.home),
+        model.contracts.RouteKind::RouteServiceShell => return handle_service_shell(ctx, decision, req.body, req.home),
+        model.contracts.RouteKind::RouteServiceSnapshot => return handle_service_snapshot(ctx, decision, req.home),
+        model.contracts.RouteKind::RouteServiceRollback => return handle_service_rollback(ctx, decision, req.home),
+        model.contracts.RouteKind::RouteRoutesList => return handle_routes_list(ctx, req, req.home),
+        model.contracts.RouteKind::RouteRoutesCreate => return handle_routes_create(ctx, req.body, req.home),
+        model.contracts.RouteKind::RouteRoutesSign => return handle_routes_sign(ctx, req.body, req.home),
+        model.contracts.RouteKind::RouteVolumesList => return handle_volumes_list(ctx, req.home),
+        model.contracts.RouteKind::RouteVolumesCreate => return handle_volumes_create(ctx, req.body, req.home),
+        model.contracts.RouteKind::RouteSecretsList => return handle_secrets_list(ctx, req, req.home),
+        model.contracts.RouteKind::RouteSecretsSet => return handle_secrets_set(ctx, req.body, req.home),
+        model.contracts.RouteKind::RouteEventsList => return handle_events_list(ctx, req, req.home),
+        _ => return fzweb.response.error_plan(fzweb.response.api_error(404, "route_not_found", "route not found", ctx.route_name)),
     }
-    if ch == "4" {
-        return 4
-    }
-    if ch == "5" {
-        return 5
-    }
-    if ch == "6" {
-        return 6
-    }
-    if ch == "7" {
-        return 7
-    }
-    if ch == "8" {
-        return 8
-    }
-    if ch == "9" {
-        return 9
-    }
-    return 0
+    return fzweb.response.error_plan(fzweb.response.api_error(404, "route_not_found", "route not found", ctx.route_name))
 }
 
-fn parse_i32(text: str) -> i32 {
-    let trimmed = str.trim(text)
-    if trimmed == "" {
-        return 0
-    }
-    let mut idx = 0
-    let mut sign = 1
-    if str.slice(trimmed, 0, 1) == "-" {
-        sign = -1
-        idx = 1
-    }
-    if idx >= str.len(trimmed) {
-        return 0
-    }
-    let mut value = 0
-    while idx < str.len(trimmed) {
-        let ch = str.slice(trimmed, idx, idx + 1)
-        if ch < "0" || ch > "9" {
-            return 0
-        }
-        value = (value * 10) + digit_value(ch)
-        idx += 1
-    }
-    return value * sign
-}
-
-fn request_error_plan(err: model.request.RequestError) -> model.response.ResponsePlan {
-    return model.response.error_plan(model.response.request_error(err))
-}
-
-fn route_json(method: str, path: str, body_json: str, home: str) -> str {
-    return model.response.emit_body(route_plan(method, path, body_json, home))
-}
-
-fn route_plan(method: str, path: str, body_json: str, home: str) -> model.response.ResponsePlan {
-    let path_only = route_path(path)
-    let kind = model.contracts.route_kind(method, path_only)
-    let ctx = model.request.context(kind, path_only)
-    match kind {
-        model.contracts.RouteKind::RouteHealth => return handle_health(ctx),
-        model.contracts.RouteKind::RouteServicesList => return handle_services_list(ctx, home),
-        model.contracts.RouteKind::RouteServiceDeploy => return handle_service_deploy(ctx, body_json, home),
-        model.contracts.RouteKind::RouteServiceStart => return handle_service_start(ctx, path_only, home),
-        model.contracts.RouteKind::RouteServiceStop => return handle_service_stop(ctx, path_only, home),
-        model.contracts.RouteKind::RouteServiceRestart => return handle_service_restart(ctx, path_only, home),
-        model.contracts.RouteKind::RouteServiceDestroy => return handle_service_destroy(ctx, path_only, home),
-        model.contracts.RouteKind::RouteServiceInspect => return handle_service_inspect(ctx, path_only, home),
-        model.contracts.RouteKind::RouteServiceLogs => return handle_service_logs(ctx, path_only, path, home),
-        model.contracts.RouteKind::RouteServiceShell => return handle_service_shell(ctx, path_only, body_json, home),
-        model.contracts.RouteKind::RouteServiceSnapshot => return handle_service_snapshot(ctx, path_only, home),
-        model.contracts.RouteKind::RouteServiceRollback => return handle_service_rollback(ctx, path_only, home),
-        model.contracts.RouteKind::RouteRoutesList => return handle_routes_list(ctx, path, home),
-        model.contracts.RouteKind::RouteRoutesCreate => return handle_routes_create(ctx, body_json, home),
-        model.contracts.RouteKind::RouteRoutesSign => return handle_routes_sign(ctx, body_json, home),
-        model.contracts.RouteKind::RouteVolumesList => return handle_volumes_list(ctx, home),
-        model.contracts.RouteKind::RouteVolumesCreate => return handle_volumes_create(ctx, body_json, home),
-        model.contracts.RouteKind::RouteSecretsList => return handle_secrets_list(ctx, path, home),
-        model.contracts.RouteKind::RouteSecretsSet => return handle_secrets_set(ctx, body_json, home),
-        model.contracts.RouteKind::RouteEventsList => return handle_events_list(ctx, path, home),
-        _ => return model.response.error_plan(model.response.api_error(404, "route_not_found", str.concat("route not found for ", path), ctx.route_name)),
-    }
-    return model.response.error_plan(model.response.api_error(404, "route_not_found", "route not found", ctx.route_name))
+fn dispatch_json(
+    method: str,
+    path: str,
+    body_json: str,
+    home: str,
+    content_type: str,
+    accept: str,
+    authorization: str,
+) -> str {
+    let plan = route_plan(method, path, body_json, home, content_type, accept, authorization)
+    return http_response_json(plan.status, plan.content_type, plan.body)
 }
 
 fn request_action_json(action: str, fields: ListHandle, home: str) -> str {
@@ -195,220 +138,217 @@ fn raw_json_field(key: str, value_json: str) -> str {
     return str.concat(key, "\t", value_json)
 }
 
-fn handle_health(ctx: model.request.RequestContext) -> model.response.ResponsePlan {
+fn handle_health(ctx: fzweb.request.RequestContext, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.json_plan(200, model.types.control_ok_json("health", model.types.platform_health_json(services.web.route_count(), api.ffi.schema_version())))
+    return fzweb.response.json_plan(200, request_action_json("health", list.new(), home))
 }
 
-fn handle_services_list(ctx: model.request.RequestContext, home: str) -> model.response.ResponsePlan {
+fn handle_services_list(ctx: fzweb.request.RequestContext, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.json_plan(200, request_action_json("services", list.new(), home))
+    return fzweb.response.json_plan(200, request_action_json("services", list.new(), home))
 }
 
-fn handle_service_deploy(ctx: model.request.RequestContext, body_json: str, home: str) -> model.response.ResponsePlan {
-    let parsed = model.request.parse_json_required(body_json, ctx.route_name)
+fn handle_service_deploy(ctx: fzweb.request.RequestContext, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
     if parsed.ok == 0 {
         return request_error_plan(parsed.err)
     }
     let fields = list.new()
-    let app_path = model.request.json_required_str(parsed.payload, "app_path", ctx.route_name)
+    let app_path = fzweb.request.json_required_str(parsed.payload, "app_path", ctx.route_name)
     if app_path.ok == 0 {
         return request_error_plan(app_path.err)
     }
     discard list.push(fields, raw_string_field("app_path", app_path.value))
-    return model.response.accepted_json(request_action_json("deploy", fields, home))
+    return fzweb.response.accepted_json(request_action_json("deploy", fields, home))
 }
 
-fn handle_service_start(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn request_action_json_for_service(action: str, decision: fzweb.app.RouteDecision, home: str) -> str {
+    let fields = list.new()
+    discard list.push(fields, raw_string_field("service", fzweb.app.param(decision, "service")))
+    return request_action_json(action, fields, home)
+}
+
+fn handle_service_start(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.accepted_json(request_action_json_for_service("start", path, "/start", home))
+    return fzweb.response.accepted_json(request_action_json_for_service("start", decision, home))
 }
 
-fn handle_service_stop(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn handle_service_stop(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.accepted_json(request_action_json_for_service("stop", path, "/stop", home))
+    return fzweb.response.accepted_json(request_action_json_for_service("stop", decision, home))
 }
 
-fn handle_service_restart(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn handle_service_restart(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.accepted_json(request_action_json_for_service("restart", path, "/restart", home))
+    return fzweb.response.accepted_json(request_action_json_for_service("restart", decision, home))
 }
 
-fn handle_service_destroy(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn handle_service_destroy(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.accepted_json(request_action_json_for_service("destroy", path, "/destroy", home))
+    return fzweb.response.accepted_json(request_action_json_for_service("destroy", decision, home))
 }
 
-fn handle_service_inspect(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn handle_service_inspect(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.json_plan(200, request_action_json_for_service("inspect", path, "/inspect", home))
+    return fzweb.response.json_plan(200, request_action_json_for_service("inspect", decision, home))
 }
 
-fn handle_service_logs(ctx: model.request.RequestContext, path_only: str, full_path: str, home: str) -> model.response.ResponsePlan {
+fn handle_service_logs(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, req: fzweb.request.RequestEnvelope, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
     let fields = list.new()
-    discard list.push(fields, raw_string_field("service", model.contracts.service_name_from_action_path(path_only, "/logs")))
-    let lines = query_value(full_path, "lines")
-    if str.trim(lines) != "" {
-        let parsed = parse_i32(lines)
-        if parsed > 0 {
-            discard list.push(fields, str.concat("lines\t", str.from_i32(parsed)))
-        }
+    discard list.push(fields, raw_string_field("service", fzweb.app.param(decision, "service")))
+    let lines = fzweb.request.query_i32_default(req, "lines", 50)
+    if lines > 0 {
+        discard list.push(fields, str.concat("lines\t", str.from_i32(lines)))
     }
-    return model.response.json_plan(200, request_action_json("logs", fields, home))
+    return fzweb.response.json_plan(200, request_action_json("logs", fields, home))
 }
 
-fn handle_service_shell(ctx: model.request.RequestContext, path: str, body_json: str, home: str) -> model.response.ResponsePlan {
-    let parsed = model.request.parse_json_required(body_json, ctx.route_name)
+fn handle_service_shell(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
     if parsed.ok == 0 {
         return request_error_plan(parsed.err)
     }
     let fields = list.new()
-    discard list.push(fields, raw_string_field("service", model.contracts.service_name_from_action_path(path, "/shell")))
-    let command_json = model.request.json_optional_raw(parsed.payload, "command")
+    discard list.push(fields, raw_string_field("service", fzweb.app.param(decision, "service")))
+    let command_json = fzweb.request.json_optional_raw(parsed.payload, "command")
     if str.trim(command_json) == "" {
         discard list.push(fields, raw_json_field("command", "[]"))
     } else {
         discard list.push(fields, raw_json_field("command", command_json))
     }
-    return model.response.accepted_json(request_action_json("shell", fields, home))
+    return fzweb.response.accepted_json(request_action_json("shell", fields, home))
 }
 
-fn handle_service_snapshot(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn handle_service_snapshot(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.accepted_json(request_action_json_for_service("snapshot", path, "/snapshot", home))
+    return fzweb.response.accepted_json(request_action_json_for_service("snapshot", decision, home))
 }
 
-fn handle_service_rollback(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
-    discard ctx
-    let fields = list.new()
-    discard list.push(fields, raw_string_field("service", model.contracts.rollback_service_name(path)))
-    discard list.push(fields, raw_string_field("snapshot", model.contracts.rollback_snapshot_name(path)))
-    return model.response.accepted_json(request_action_json("rollback", fields, home))
-}
-
-fn handle_routes_list(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn handle_service_rollback(ctx: fzweb.request.RequestContext, decision: fzweb.app.RouteDecision, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
     let fields = list.new()
-    let service = query_value(path, "service")
+    discard list.push(fields, raw_string_field("service", fzweb.app.param(decision, "service")))
+    discard list.push(fields, raw_string_field("snapshot", fzweb.app.param(decision, "snapshot")))
+    return fzweb.response.accepted_json(request_action_json("rollback", fields, home))
+}
+
+fn handle_routes_list(ctx: fzweb.request.RequestContext, req: fzweb.request.RequestEnvelope, home: str) -> fzweb.response.ResponsePlan {
+    discard ctx
+    let fields = list.new()
+    let service = fzweb.request.query(req, "service")
     if str.trim(service) != "" {
         discard list.push(fields, raw_string_field("service", service))
     }
-    return model.response.json_plan(200, request_action_json("route_list", fields, home))
+    return fzweb.response.json_plan(200, request_action_json("route_list", fields, home))
 }
 
-fn handle_routes_create(ctx: model.request.RequestContext, body_json: str, home: str) -> model.response.ResponsePlan {
-    let parsed = model.request.parse_json_required(body_json, ctx.route_name)
+fn handle_routes_create(ctx: fzweb.request.RequestContext, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
     if parsed.ok == 0 {
         return request_error_plan(parsed.err)
     }
     let fields = list.new()
-    let service = model.request.json_required_str(parsed.payload, "service", ctx.route_name)
+    let service = fzweb.request.json_required_str(parsed.payload, "service", ctx.route_name)
     if service.ok == 0 {
         return request_error_plan(service.err)
     }
-    let domain = model.request.json_required_str(parsed.payload, "domain", ctx.route_name)
+    let domain = fzweb.request.json_required_str(parsed.payload, "domain", ctx.route_name)
     if domain.ok == 0 {
         return request_error_plan(domain.err)
     }
     discard list.push(fields, raw_string_field("service", service.value))
     discard list.push(fields, raw_string_field("domain", domain.value))
-    discard list.push(fields, raw_json_field("port", model.request.json_optional_str(parsed.payload, "port")))
-    return model.response.accepted_json(request_action_json("route_add", fields, home))
+    discard list.push(fields, raw_json_field("port", fzweb.request.json_optional_str(parsed.payload, "port")))
+    return fzweb.response.accepted_json(request_action_json("route_add", fields, home))
 }
 
-fn handle_routes_sign(ctx: model.request.RequestContext, body_json: str, home: str) -> model.response.ResponsePlan {
-    let parsed = model.request.parse_json_required(body_json, ctx.route_name)
+fn handle_routes_sign(ctx: fzweb.request.RequestContext, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
     if parsed.ok == 0 {
         return request_error_plan(parsed.err)
     }
     let fields = list.new()
-    let service = model.request.json_required_str(parsed.payload, "service", ctx.route_name)
+    let service = fzweb.request.json_required_str(parsed.payload, "service", ctx.route_name)
     if service.ok == 0 {
         return request_error_plan(service.err)
     }
-    let domain = model.request.json_required_str(parsed.payload, "domain", ctx.route_name)
+    let domain = fzweb.request.json_required_str(parsed.payload, "domain", ctx.route_name)
     if domain.ok == 0 {
         return request_error_plan(domain.err)
     }
-    let path = model.request.json_required_str(parsed.payload, "path", ctx.route_name)
+    let path = fzweb.request.json_required_str(parsed.payload, "path", ctx.route_name)
     if path.ok == 0 {
         return request_error_plan(path.err)
     }
     discard list.push(fields, raw_string_field("service", service.value))
     discard list.push(fields, raw_string_field("domain", domain.value))
     discard list.push(fields, raw_string_field("path", path.value))
-    discard list.push(fields, raw_json_field("expires_in", model.request.json_optional_str(parsed.payload, "expires_in")))
-    discard list.push(fields, raw_nullable_string_field("scheme", model.request.json_optional_str(parsed.payload, "scheme")))
-    return model.response.accepted_json(request_action_json("route_sign", fields, home))
+    discard list.push(fields, raw_json_field("expires_in", fzweb.request.json_optional_str(parsed.payload, "expires_in")))
+    discard list.push(fields, raw_nullable_string_field("scheme", fzweb.request.json_optional_str(parsed.payload, "scheme")))
+    return fzweb.response.accepted_json(request_action_json("route_sign", fields, home))
 }
 
-fn handle_volumes_list(ctx: model.request.RequestContext, home: str) -> model.response.ResponsePlan {
+fn handle_volumes_list(ctx: fzweb.request.RequestContext, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
-    return model.response.json_plan(200, request_action_json("volume_list", list.new(), home))
+    return fzweb.response.json_plan(200, request_action_json("volume_list", list.new(), home))
 }
 
-fn handle_volumes_create(ctx: model.request.RequestContext, body_json: str, home: str) -> model.response.ResponsePlan {
-    let parsed = model.request.parse_json_required(body_json, ctx.route_name)
+fn handle_volumes_create(ctx: fzweb.request.RequestContext, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
     if parsed.ok == 0 {
         return request_error_plan(parsed.err)
     }
     let fields = list.new()
-    let name = model.request.json_required_str(parsed.payload, "name", ctx.route_name)
+    let name = fzweb.request.json_required_str(parsed.payload, "name", ctx.route_name)
     if name.ok == 0 {
         return request_error_plan(name.err)
     }
     discard list.push(fields, raw_string_field("name", name.value))
-    discard list.push(fields, raw_nullable_string_field("service", model.request.json_optional_str(parsed.payload, "service")))
-    return model.response.accepted_json(request_action_json("volume_create", fields, home))
+    discard list.push(fields, raw_nullable_string_field("service", fzweb.request.json_optional_str(parsed.payload, "service")))
+    return fzweb.response.accepted_json(request_action_json("volume_create", fields, home))
 }
 
-fn handle_secrets_list(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn handle_secrets_list(ctx: fzweb.request.RequestContext, req: fzweb.request.RequestEnvelope, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
     let fields = list.new()
-    let service = query_value(path, "service")
+    let service = fzweb.request.query(req, "service")
     if str.trim(service) != "" {
         discard list.push(fields, raw_string_field("service", service))
     }
-    return model.response.json_plan(200, request_action_json("secret_list", fields, home))
+    return fzweb.response.json_plan(200, request_action_json("secret_list", fields, home))
 }
 
-fn handle_secrets_set(ctx: model.request.RequestContext, body_json: str, home: str) -> model.response.ResponsePlan {
-    let parsed = model.request.parse_json_required(body_json, ctx.route_name)
+fn handle_secrets_set(ctx: fzweb.request.RequestContext, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
     if parsed.ok == 0 {
         return request_error_plan(parsed.err)
     }
     let fields = list.new()
-    let service = model.request.json_required_str(parsed.payload, "service", ctx.route_name)
+    let service = fzweb.request.json_required_str(parsed.payload, "service", ctx.route_name)
     if service.ok == 0 {
         return request_error_plan(service.err)
     }
-    let key = model.request.json_required_str(parsed.payload, "key", ctx.route_name)
+    let key = fzweb.request.json_required_str(parsed.payload, "key", ctx.route_name)
     if key.ok == 0 {
         return request_error_plan(key.err)
     }
-    let value = model.request.json_required_str(parsed.payload, "value", ctx.route_name)
+    let value = fzweb.request.json_required_str(parsed.payload, "value", ctx.route_name)
     if value.ok == 0 {
         return request_error_plan(value.err)
     }
     discard list.push(fields, raw_string_field("service", service.value))
     discard list.push(fields, raw_string_field("key", key.value))
     discard list.push(fields, raw_string_field("value", value.value))
-    return model.response.accepted_json(request_action_json("secret_set", fields, home))
+    return fzweb.response.accepted_json(request_action_json("secret_set", fields, home))
 }
 
-fn handle_events_list(ctx: model.request.RequestContext, path: str, home: str) -> model.response.ResponsePlan {
+fn handle_events_list(ctx: fzweb.request.RequestContext, req: fzweb.request.RequestEnvelope, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
     let fields = list.new()
-    let service = query_value(path, "service")
+    let service = fzweb.request.query(req, "service")
     if str.trim(service) != "" {
         discard list.push(fields, raw_string_field("service", service))
     }
-    return model.response.json_plan(200, request_action_json("events", fields, home))
-}
-
-fn request_action_json_for_service(action: str, path: str, suffix: str, home: str) -> str {
-    let fields = list.new()
-    discard list.push(fields, raw_string_field("service", model.contracts.service_name_from_action_path(path, suffix)))
-    return request_action_json(action, fields, home)
+    return fzweb.response.json_plan(200, request_action_json("events", fields, home))
 }

@@ -1,0 +1,300 @@
+struct RequestEnvelope {
+    method: str,
+    path: str,
+    route_path: str,
+    body: str,
+    home: str,
+    content_type: str,
+    accept: str,
+    authorization: str,
+    remote_addr: str,
+    request_id: str,
+}
+
+struct RequestContext {
+    route_id: i32,
+    route_name: str,
+    route_path: str,
+    request_id: str,
+}
+
+struct RequestError {
+    status: i32,
+    code: str,
+    message: str,
+    details: str,
+}
+
+struct TextResult {
+    ok: i32,
+    value: str,
+    err: RequestError,
+}
+
+struct IntResult {
+    ok: i32,
+    value: i32,
+    err: RequestError,
+}
+
+struct JsonResult {
+    ok: i32,
+    payload: JsonHandle,
+    raw: str,
+    err: RequestError,
+}
+
+fn query_start(path: str) -> i32 {
+    let mut idx = 0
+    while idx < str.len(path) {
+        if str.slice(path, idx, idx + 1) == "?" {
+            return idx
+        }
+        idx += 1
+    }
+    return -1
+}
+
+fn route_path(path: str) -> str {
+    let idx = query_start(path)
+    if idx < 0 {
+        return path
+    }
+    return str.slice(path, 0, idx)
+}
+
+fn control_request(
+    method: str,
+    path: str,
+    body: str,
+    home: str,
+    content_type: str,
+    accept: str,
+    authorization: str,
+) -> RequestEnvelope {
+    let actual_content_type = if str.trim(content_type) == "" && str.trim(body) != "" {
+        "application/json"
+    } else {
+        content_type
+    }
+    return RequestEnvelope {
+        method: method,
+        path: path,
+        route_path: route_path(path),
+        body: body,
+        home: home,
+        content_type: actual_content_type,
+        accept: accept,
+        authorization: authorization,
+        remote_addr: "controlplane",
+        request_id: str.concat("ctl:", str.concat(method, route_path(path))),
+    }
+}
+
+fn context(decision: fzweb.app.RouteDecision, req: RequestEnvelope) -> RequestContext {
+    return RequestContext {
+        route_id: decision.route_id,
+        route_name: decision.route_name,
+        route_path: decision.route_path,
+        request_id: req.request_id,
+    }
+}
+
+fn query(req: RequestEnvelope, key: str) -> str {
+    let start = query_start(req.path)
+    if start < 0 || start + 1 >= str.len(req.path) {
+        return ""
+    }
+    let marker = str.concat(key, "=")
+    let text = str.slice(req.path, start + 1, str.len(req.path))
+    let mut idx = 0
+    while idx < str.len(text) {
+        let next = idx + str.len(marker)
+        if next <= str.len(text) && str.slice(text, idx, next) == marker {
+            let value_start = next
+            let mut value_end = value_start
+            while value_end < str.len(text) {
+                if str.slice(text, value_end, value_end + 1) == "&" {
+                    return str.slice(text, value_start, value_end)
+                }
+                value_end += 1
+            }
+            return str.slice(text, value_start, str.len(text))
+        }
+        while idx < str.len(text) && str.slice(text, idx, idx + 1) != "&" {
+            idx += 1
+        }
+        if idx < str.len(text) && str.slice(text, idx, idx + 1) == "&" {
+            idx += 1
+        }
+    }
+    return ""
+}
+
+fn no_error() -> RequestError {
+    return RequestError {
+        status: 0,
+        code: "",
+        message: "",
+        details: "",
+    }
+}
+
+fn error(status: i32, code: str, message: str, details: str) -> RequestError {
+    return RequestError {
+        status: status,
+        code: code,
+        message: message,
+        details: details,
+    }
+}
+
+fn text_ok(value: str) -> TextResult {
+    return TextResult {
+        ok: 1,
+        value: value,
+        err: no_error(),
+    }
+}
+
+fn text_err(status: i32, code: str, message: str, details: str) -> TextResult {
+    return TextResult {
+        ok: 0,
+        value: "",
+        err: error(status, code, message, details),
+    }
+}
+
+fn int_ok(value: i32) -> IntResult {
+    return IntResult {
+        ok: 1,
+        value: value,
+        err: no_error(),
+    }
+}
+
+fn int_err(status: i32, code: str, message: str, details: str) -> IntResult {
+    return IntResult {
+        ok: 0,
+        value: 0,
+        err: error(status, code, message, details),
+    }
+}
+
+fn json_ok(payload: JsonHandle, raw: str) -> JsonResult {
+    return JsonResult {
+        ok: 1,
+        payload: payload,
+        raw: raw,
+        err: no_error(),
+    }
+}
+
+fn json_err(status: i32, code: str, message: str, details: str) -> JsonResult {
+    return JsonResult {
+        ok: 0,
+        payload: json.parse("{}"),
+        raw: "",
+        err: error(status, code, message, details),
+    }
+}
+
+fn digit_value(ch: str) -> i32 {
+    if ch == "0" { return 0 }
+    if ch == "1" { return 1 }
+    if ch == "2" { return 2 }
+    if ch == "3" { return 3 }
+    if ch == "4" { return 4 }
+    if ch == "5" { return 5 }
+    if ch == "6" { return 6 }
+    if ch == "7" { return 7 }
+    if ch == "8" { return 8 }
+    if ch == "9" { return 9 }
+    return 0
+}
+
+fn is_digit(ch: str) -> i32 {
+    if ch == "0" { return 1 }
+    if ch == "1" { return 1 }
+    if ch == "2" { return 1 }
+    if ch == "3" { return 1 }
+    if ch == "4" { return 1 }
+    if ch == "5" { return 1 }
+    if ch == "6" { return 1 }
+    if ch == "7" { return 1 }
+    if ch == "8" { return 1 }
+    if ch == "9" { return 1 }
+    return 0
+}
+
+fn parse_i32(text: str) -> i32 {
+    let trimmed = str.trim(text)
+    if trimmed == "" {
+        return 0
+    }
+    let mut idx = 0
+    let mut sign = 1
+    if str.slice(trimmed, 0, 1) == "-" {
+        sign = -1
+        idx = 1
+    }
+    if idx >= str.len(trimmed) {
+        return 0
+    }
+    let mut value = 0
+    while idx < str.len(trimmed) {
+        let ch = str.slice(trimmed, idx, idx + 1)
+        if is_digit(ch) == 0 {
+            return 0
+        }
+        value = (value * 10) + digit_value(ch)
+        idx += 1
+    }
+    return value * sign
+}
+
+fn query_i32_default(req: RequestEnvelope, key: str, fallback: i32) -> i32 {
+    let value = query(req, key)
+    if str.trim(value) == "" {
+        return fallback
+    }
+    let parsed = parse_i32(value)
+    if parsed == 0 && str.trim(value) != "0" {
+        return fallback
+    }
+    return parsed
+}
+
+fn content_type_is_json(req: RequestEnvelope) -> i32 {
+    let lower = str.lower_ascii(str.trim(req.content_type))
+    if lower == "" {
+        return 1
+    }
+    if str.contains(lower, "application/json") == 1 {
+        return 1
+    }
+    return 0
+}
+
+fn parse_json_required(body_json: str, route_name: str) -> JsonResult {
+    if str.trim(body_json) == "" {
+        return json_err(400, "missing_body", "request body is required", route_name)
+    }
+    return json_ok(json.parse(body_json), body_json)
+}
+
+fn json_required_str(payload: JsonHandle, key: str, route_name: str) -> TextResult {
+    let value = json.get_str(payload, key)
+    if str.trim(value) == "" {
+        return text_err(400, "missing_field", str.concat("missing required field `", str.concat(key, "`")), route_name)
+    }
+    return text_ok(value)
+}
+
+fn json_optional_str(payload: JsonHandle, key: str) -> str {
+    return json.get_str(payload, key)
+}
+
+fn json_optional_raw(payload: JsonHandle, key: str) -> str {
+    return json.get_str(json.get(payload, key), "raw")
+}

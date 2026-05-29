@@ -14,6 +14,14 @@ fn output_path() -> str {
     return "/var/tmp/megaserver.fzy.control.output.json"
 }
 
+fn host_input_path() -> str {
+    return "/tmp/megaserver.fzy.host.input.json"
+}
+
+fn host_output_path() -> str {
+    return "/tmp/megaserver.fzy.host.output.json"
+}
+
 fn error_payload(message: str) -> str {
     let payload = map.new()
     discard map.set(payload, "status", json.str("error"))
@@ -30,6 +38,10 @@ fn string_field(raw: str, key: str) -> str {
     return json.get_str(parsed(raw), key)
 }
 
+fn raw_field(raw: str, key: str) -> str {
+    return json.get_str(json.get(parsed(raw), key), "raw")
+}
+
 fn action(raw: str) -> str {
     return string_field(raw, "action")
 }
@@ -44,6 +56,22 @@ fn path(raw: str) -> str {
 
 fn body(raw: str) -> str {
     return string_field(raw, "body")
+}
+
+fn body_raw(raw: str) -> str {
+    return raw_field(raw, "body")
+}
+
+fn content_type(raw: str) -> str {
+    return string_field(raw, "content_type")
+}
+
+fn accept(raw: str) -> str {
+    return string_field(raw, "accept")
+}
+
+fn authorization(raw: str) -> str {
+    return string_field(raw, "authorization")
 }
 
 fn home(raw: str) -> str {

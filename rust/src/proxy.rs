@@ -66,8 +66,13 @@ pub async fn serve(
             .await?;
     } else {
         let listener = tokio::net::TcpListener::bind(bind).await?;
-        axum::serve(listener, app).await?;
+        serve_listener(listener, app).await?;
     }
+    Ok(())
+}
+
+async fn serve_listener(listener: tokio::net::TcpListener, app: Router) -> Result<()> {
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
@@ -354,14 +359,6 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::{accept_async, connect_async};
 
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("bind ephemeral port")
-            .local_addr()
-            .expect("local addr")
-            .port()
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingress_proxies_websockets() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
@@ -369,10 +366,8 @@ mod tests {
         let paths = StatePaths::resolve(Some(temp.path().join("proxy-home"))).unwrap();
         state::init(&paths).unwrap();
 
-        let upstream_port = free_port();
-        let upstream_listener = TcpListener::bind(("127.0.0.1", upstream_port))
-            .await
-            .unwrap();
+        let upstream_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (stream, _) = upstream_listener.accept().await.unwrap();
             let mut ws = accept_async(stream).await.unwrap();
@@ -398,11 +393,22 @@ mod tests {
         state::put_route(&conn, "ws-service", "ws.local", Some(upstream_port)).unwrap();
         drop(conn);
 
-        let proxy_port = free_port();
-        let proxy_bind: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+        let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
         let proxy_paths = paths.clone();
         tokio::spawn(async move {
-            let _ = serve(proxy_paths, proxy_bind, None).await;
+            let state = ProxyState {
+                client: Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .unwrap(),
+                paths: proxy_paths,
+                ingress_scheme: "http".to_string(),
+            };
+            let app = Router::new()
+                .fallback(any(proxy_request))
+                .with_state(Arc::new(state));
+            let _ = serve_listener(proxy_listener, app).await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 

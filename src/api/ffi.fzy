@@ -1,12 +1,24 @@
-ext unsafe c fn megaserver_host_dispatch(ptr_borrowed: *u8, len: usize) -> i32;
+use core.fs;
+
+ext unsafe c fn megaserver_host_dispatch() -> i32;
 
 fn schema_version() -> i32 {
     return 1
 }
 
 fn abi_dispatch(raw: str) -> i32 {
+    discard fs.write_file(model.control.host_input_path(), raw)
+    discard fs.write_file(model.control.host_output_path(), "")
+    return safe_dispatch()
+}
+
+fn safe_dispatch() -> i32 {
+    return raw_dispatch()
+}
+
+fn raw_dispatch() -> i32 {
     unsafe {
-        return megaserver_host_dispatch(raw, str.len(raw))
+        return megaserver_host_dispatch()
     }
 }
 

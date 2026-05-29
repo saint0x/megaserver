@@ -7,14 +7,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 static LAST_ERROR: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+const HOST_INPUT: &str = "/tmp/megaserver.fzy.host.input.json";
+const HOST_OUTPUT: &str = "/tmp/megaserver.fzy.host.output.json";
 
 pub fn link_host_abi() {
-    let _ = megaserver_host_dispatch as extern "C" fn(*const u8, usize) -> i32;
+    let _ = megaserver_host_dispatch as extern "C" fn() -> i32;
     let _ = megaserver_host_last_error_message as extern "C" fn() -> *const c_char;
 }
 
 #[used]
-static HOST_DISPATCH_SYMBOL: extern "C" fn(*const u8, usize) -> i32 = megaserver_host_dispatch;
+static HOST_DISPATCH_SYMBOL: extern "C" fn() -> i32 = megaserver_host_dispatch;
+
+#[used]
+static HOST_DISPATCH_ALIAS_SYMBOL: extern "C" fn() -> i32 = megaserver_host_dispatch_alias;
 
 #[used]
 static HOST_ERROR_SYMBOL: extern "C" fn() -> *const c_char = megaserver_host_last_error_message;
@@ -228,8 +233,18 @@ fn dispatch_value(request: &Value) -> anyhow::Result<Value> {
         }
         "health" => {
             let conn = state::open(&paths)?;
-            let services = state::list_services(&conn)?;
-            Ok(json!({"status":"ok","services":services.len(),"home":paths.home}))
+            let service_count = state::list_services(&conn)?.len();
+            let sandbox_count = state::list_sandboxes(&conn)?.len();
+            let route_count = state::list_routes(&conn, None)?.len();
+            Ok(json!({
+                "status":"ok",
+                "home":paths.home,
+                "service_count": service_count,
+                "sandbox_count": sandbox_count,
+                "route_count": route_count,
+                "route_runtime_count": route_count,
+                "ingress":"running"
+            }))
         }
         "shell" => {
             let service = request
@@ -264,30 +279,16 @@ pub extern "C" fn megaserver_host_last_error_message() -> *const c_char {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) -> i32 {
-    let request_text = if ptr_borrowed.is_null() {
-        if len == 0 {
-            String::new()
-        } else {
-            set_last_error("borrowed control input pointer was null with non-zero length");
+pub extern "C" fn megaserver_host_dispatch() -> i32 {
+    let request_text = match std::fs::read_to_string(HOST_INPUT) {
+        Ok(text) => text,
+        Err(err) => {
+            set_last_error(&format!("read control input failed: {err}"));
             let _ = std::fs::write(
-                control_output_path(),
-                json!({"status":"error","message":"borrowed control input pointer was null with non-zero length","control_plane":"rust-host"}).to_string(),
+                HOST_OUTPUT,
+                json!({"status":"error","message":format!("read control input failed: {err}"),"control_plane":"rust-host"}).to_string(),
             );
             return 21;
-        }
-    } else {
-        let bytes = unsafe { std::slice::from_raw_parts(ptr_borrowed, len) };
-        match std::str::from_utf8(bytes) {
-            Ok(text) => text.to_owned(),
-            Err(err) => {
-                set_last_error(&format!("invalid borrowed control input utf-8: {err}"));
-                let _ = std::fs::write(
-                    control_output_path(),
-                    json!({"status":"error","message":format!("invalid borrowed control input utf-8: {err}"),"control_plane":"rust-host"}).to_string(),
-                );
-                return 22;
-            }
         }
     };
 
@@ -296,7 +297,7 @@ pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) 
         Err(err) => {
             set_last_error(&format!("invalid control request json: {err}"));
             let _ = std::fs::write(
-                control_output_path(),
+                HOST_OUTPUT,
                 json!({"status":"error","message":format!("invalid control request json: {err}"),"control_plane":"rust-host"}).to_string(),
             );
             return 22;
@@ -305,7 +306,7 @@ pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) 
 
     match dispatch_value(&request) {
         Ok(value) => {
-            if let Err(err) = std::fs::write(control_output_path(), value.to_string()) {
+            if let Err(err) = std::fs::write(HOST_OUTPUT, value.to_string()) {
                 set_last_error(&format!("write control output failed: {err}"));
                 return 5;
             }
@@ -314,11 +315,16 @@ pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) 
         Err(err) => {
             set_last_error(&err.to_string());
             let _ = std::fs::write(
-                control_output_path(),
+                HOST_OUTPUT,
                 json!({"status":"error","message":err.to_string(),"control_plane":"rust-host"})
                     .to_string(),
             );
             1
         }
     }
+}
+
+#[unsafe(export_name = "api_ffi_megaserver_host_dispatch")]
+pub extern "C" fn megaserver_host_dispatch_alias() -> i32 {
+    megaserver_host_dispatch()
 }

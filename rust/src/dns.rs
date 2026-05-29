@@ -15,9 +15,19 @@ const DNS_PID_FILE: &str = "dns.pid";
 #[cfg(not(test))]
 const DNS_LOG_FILE: &str = "dns.log";
 
+#[cfg(target_os = "linux")]
+fn network_isolation_supported() -> bool {
+    crate::network::linux::isolation_supported()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn network_isolation_supported() -> bool {
+    false
+}
+
 #[cfg(test)]
 pub fn ensure_running(paths: &StatePaths) -> Result<()> {
-    if !cfg!(target_os = "linux") || !crate::network::linux::isolation_supported() {
+    if !network_isolation_supported() {
         return Ok(());
     }
     start_embedded_test_server(paths.clone())
@@ -25,7 +35,7 @@ pub fn ensure_running(paths: &StatePaths) -> Result<()> {
 
 #[cfg(not(test))]
 pub fn ensure_running(paths: &StatePaths) -> Result<()> {
-    if !cfg!(target_os = "linux") || !crate::network::linux::isolation_supported() {
+    if !network_isolation_supported() {
         return Ok(());
     }
     let pid_path = pid_path(paths);

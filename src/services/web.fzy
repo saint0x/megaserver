@@ -1,23 +1,39 @@
 use core.fs;
 
-fn push_route(routes: ListHandle, kind: model.contracts.RouteKind, method: str, path: str, auth: str) -> i32 {
-    discard list.push(
-        routes,
-        json.raw(
-            model.types.route_json(
-                model.contracts.route_id(kind),
-                model.contracts.route_name(kind),
-                method,
-                path,
-                model.contracts.route_prefix(kind),
-                model.contracts.route_public(kind),
-                model.contracts.route_skip_rate(kind),
-                model.contracts.route_require_json(kind),
-                auth,
-            ),
-        ),
-    )
-    return 0
+fn route_auth(kind: model.contracts.RouteKind) -> str {
+    if model.contracts.route_public(kind) == 1 {
+        return "public"
+    }
+    return "operator"
+}
+
+fn app() -> fzweb.app.App {
+    let mut web = fzweb.app.make("megaserver", "0.1")
+    web = fzweb.app.use_middleware(web, "json")
+    web = fzweb.app.use_middleware(web, "rate_limit")
+    web = fzweb.app.use_middleware(web, "auth")
+
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteHealth), model.contracts.route_name(model.contracts.RouteKind::RouteHealth), "GET", "/v1/health", model.contracts.route_prefix(model.contracts.RouteKind::RouteHealth), model.contracts.route_public(model.contracts.RouteKind::RouteHealth), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteHealth), model.contracts.route_require_json(model.contracts.RouteKind::RouteHealth)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServicesList), model.contracts.route_name(model.contracts.RouteKind::RouteServicesList), "GET", "/v1/services", model.contracts.route_prefix(model.contracts.RouteKind::RouteServicesList), model.contracts.route_public(model.contracts.RouteKind::RouteServicesList), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServicesList), model.contracts.route_require_json(model.contracts.RouteKind::RouteServicesList)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceDeploy), model.contracts.route_name(model.contracts.RouteKind::RouteServiceDeploy), "POST", "/v1/services/deploy", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceDeploy), model.contracts.route_public(model.contracts.RouteKind::RouteServiceDeploy), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceDeploy), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceDeploy)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceStart), model.contracts.route_name(model.contracts.RouteKind::RouteServiceStart), "POST", "/v1/services/:service/start", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceStart), model.contracts.route_public(model.contracts.RouteKind::RouteServiceStart), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceStart), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceStart)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceStop), model.contracts.route_name(model.contracts.RouteKind::RouteServiceStop), "POST", "/v1/services/:service/stop", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceStop), model.contracts.route_public(model.contracts.RouteKind::RouteServiceStop), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceStop), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceStop)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceRestart), model.contracts.route_name(model.contracts.RouteKind::RouteServiceRestart), "POST", "/v1/services/:service/restart", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceRestart), model.contracts.route_public(model.contracts.RouteKind::RouteServiceRestart), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceRestart), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceRestart)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceDestroy), model.contracts.route_name(model.contracts.RouteKind::RouteServiceDestroy), "POST", "/v1/services/:service/destroy", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceDestroy), model.contracts.route_public(model.contracts.RouteKind::RouteServiceDestroy), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceDestroy), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceDestroy)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceInspect), model.contracts.route_name(model.contracts.RouteKind::RouteServiceInspect), "GET", "/v1/services/:service/inspect", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceInspect), model.contracts.route_public(model.contracts.RouteKind::RouteServiceInspect), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceInspect), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceInspect)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceLogs), model.contracts.route_name(model.contracts.RouteKind::RouteServiceLogs), "GET", "/v1/services/:service/logs", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceLogs), model.contracts.route_public(model.contracts.RouteKind::RouteServiceLogs), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceLogs), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceLogs)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceShell), model.contracts.route_name(model.contracts.RouteKind::RouteServiceShell), "POST", "/v1/services/:service/shell", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceShell), model.contracts.route_public(model.contracts.RouteKind::RouteServiceShell), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceShell), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceShell)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceSnapshot), model.contracts.route_name(model.contracts.RouteKind::RouteServiceSnapshot), "POST", "/v1/services/:service/snapshot", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceSnapshot), model.contracts.route_public(model.contracts.RouteKind::RouteServiceSnapshot), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceSnapshot), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceSnapshot)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteServiceRollback), model.contracts.route_name(model.contracts.RouteKind::RouteServiceRollback), "POST", "/v1/services/:service/rollback/:snapshot", model.contracts.route_prefix(model.contracts.RouteKind::RouteServiceRollback), model.contracts.route_public(model.contracts.RouteKind::RouteServiceRollback), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteServiceRollback), model.contracts.route_require_json(model.contracts.RouteKind::RouteServiceRollback)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteRoutesList), model.contracts.route_name(model.contracts.RouteKind::RouteRoutesList), "GET", "/v1/routes", model.contracts.route_prefix(model.contracts.RouteKind::RouteRoutesList), model.contracts.route_public(model.contracts.RouteKind::RouteRoutesList), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteRoutesList), model.contracts.route_require_json(model.contracts.RouteKind::RouteRoutesList)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteRoutesCreate), model.contracts.route_name(model.contracts.RouteKind::RouteRoutesCreate), "POST", "/v1/routes", model.contracts.route_prefix(model.contracts.RouteKind::RouteRoutesCreate), model.contracts.route_public(model.contracts.RouteKind::RouteRoutesCreate), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteRoutesCreate), model.contracts.route_require_json(model.contracts.RouteKind::RouteRoutesCreate)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteRoutesSign), model.contracts.route_name(model.contracts.RouteKind::RouteRoutesSign), "POST", "/v1/routes/signed-link", model.contracts.route_prefix(model.contracts.RouteKind::RouteRoutesSign), model.contracts.route_public(model.contracts.RouteKind::RouteRoutesSign), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteRoutesSign), model.contracts.route_require_json(model.contracts.RouteKind::RouteRoutesSign)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteVolumesList), model.contracts.route_name(model.contracts.RouteKind::RouteVolumesList), "GET", "/v1/volumes", model.contracts.route_prefix(model.contracts.RouteKind::RouteVolumesList), model.contracts.route_public(model.contracts.RouteKind::RouteVolumesList), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteVolumesList), model.contracts.route_require_json(model.contracts.RouteKind::RouteVolumesList)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteVolumesCreate), model.contracts.route_name(model.contracts.RouteKind::RouteVolumesCreate), "POST", "/v1/volumes", model.contracts.route_prefix(model.contracts.RouteKind::RouteVolumesCreate), model.contracts.route_public(model.contracts.RouteKind::RouteVolumesCreate), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteVolumesCreate), model.contracts.route_require_json(model.contracts.RouteKind::RouteVolumesCreate)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteSecretsList), model.contracts.route_name(model.contracts.RouteKind::RouteSecretsList), "GET", "/v1/secrets", model.contracts.route_prefix(model.contracts.RouteKind::RouteSecretsList), model.contracts.route_public(model.contracts.RouteKind::RouteSecretsList), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteSecretsList), model.contracts.route_require_json(model.contracts.RouteKind::RouteSecretsList)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteSecretsSet), model.contracts.route_name(model.contracts.RouteKind::RouteSecretsSet), "POST", "/v1/secrets", model.contracts.route_prefix(model.contracts.RouteKind::RouteSecretsSet), model.contracts.route_public(model.contracts.RouteKind::RouteSecretsSet), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteSecretsSet), model.contracts.route_require_json(model.contracts.RouteKind::RouteSecretsSet)))
+    web = fzweb.app.add_route(web, fzweb.app.route(model.contracts.route_id(model.contracts.RouteKind::RouteEventsList), model.contracts.route_name(model.contracts.RouteKind::RouteEventsList), "GET", "/v1/events", model.contracts.route_prefix(model.contracts.RouteKind::RouteEventsList), model.contracts.route_public(model.contracts.RouteKind::RouteEventsList), model.contracts.route_skip_rate(model.contracts.RouteKind::RouteEventsList), model.contracts.route_require_json(model.contracts.RouteKind::RouteEventsList)))
+    return web
 }
 
 fn openapi_path() -> str {
@@ -26,35 +42,41 @@ fn openapi_path() -> str {
 
 fn boot() -> i32 {
     discard fs.mkdir("/tmp/megaserver")
-    discard fs.write_file(openapi_path(), model.types.openapi_json(routes_json()))
+    discard fs.write_file(openapi_path(), fzweb.app.openapi_json(app()))
     return 0
 }
 
 fn routes_json() -> str {
+    let web = app()
     let routes = list.new()
-    discard push_route(routes, model.contracts.RouteKind::RouteHealth, "GET", "/v1/health", "public")
-    discard push_route(routes, model.contracts.RouteKind::RouteServicesList, "GET", "/v1/services", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceDeploy, "POST", "/v1/services/deploy", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceStart, "POST", "/v1/services/:service/start", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceStop, "POST", "/v1/services/:service/stop", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceRestart, "POST", "/v1/services/:service/restart", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceDestroy, "POST", "/v1/services/:service/destroy", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceInspect, "GET", "/v1/services/:service/inspect", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceLogs, "GET", "/v1/services/:service/logs", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceShell, "POST", "/v1/services/:service/shell", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceSnapshot, "POST", "/v1/services/:service/snapshot", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteServiceRollback, "POST", "/v1/services/:service/rollback/:snapshot", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteRoutesList, "GET", "/v1/routes", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteRoutesCreate, "POST", "/v1/routes", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteRoutesSign, "POST", "/v1/routes/signed-link", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteVolumesList, "GET", "/v1/volumes", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteVolumesCreate, "POST", "/v1/volumes", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteSecretsList, "GET", "/v1/secrets", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteSecretsSet, "POST", "/v1/secrets", "operator")
-    discard push_route(routes, model.contracts.RouteKind::RouteEventsList, "GET", "/v1/events", "operator")
+    let mut idx = 0
+    while idx < fzweb.app.route_count(web) {
+        let item = fzweb.app.route_at(web, idx)
+        discard list.push(
+            routes,
+            json.raw(
+                model.types.route_json(
+                    item.route_id,
+                    item.name,
+                    item.method,
+                    item.path,
+                    item.group,
+                    item.public_route,
+                    item.skip_rate,
+                    item.require_json,
+                    route_auth(model.contracts.route_by_id(item.route_id)),
+                ),
+            ),
+        )
+        idx += 1
+    }
     return json.array(routes)
 }
 
 fn route_count() -> i32 {
-    return 20
+    return fzweb.app.route_count(app())
+}
+
+fn policy() -> fzweb.middleware.Policy {
+    return fzweb.middleware.policy(1048576, 0, "", 1, 0, 1024)
 }

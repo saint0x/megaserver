@@ -953,8 +953,18 @@ mod tests {
     use crate::test_support::TEST_LOCK;
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
+    fn cleanup_hello_service(repo_root: &std::path::Path) {
+        let target = repo_root.join("examples/hello-service/server.py");
+        let _ = Command::new("pkill")
+            .args(["-f", target.to_string_lossy().as_ref()])
+            .status();
+        thread::sleep(Duration::from_millis(150));
+    }
     #[test]
     fn init_command_sets_up_home() {
         let temp = TempDir::new().unwrap();
@@ -966,7 +976,10 @@ mod tests {
 
     #[test]
     fn control_plane_deploy_reenters_fzy_without_deadlocking() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = crate::test_support::INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::test_support::cleanup_fzy_io_files();
         let temp = TempDir::new().unwrap();
         let paths = StatePaths::resolve(Some(temp.path().join("home"))).unwrap();
         state::init(&paths).unwrap();
@@ -975,6 +988,7 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
+        cleanup_hello_service(&repo_root);
         let example = repo_root.join("examples/hello-service");
 
         let deployed = controlplane::dispatch_ok(
@@ -1000,11 +1014,16 @@ mod tests {
         assert!(plan.contains("\"command\": ["));
 
         destroy_only(&paths, "hello-service").unwrap();
+        cleanup_hello_service(&repo_root);
+        crate::test_support::cleanup_fzy_io_files();
     }
 
     #[test]
     fn http_control_plane_preserves_home_and_json_body() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = crate::test_support::INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::test_support::cleanup_fzy_io_files();
         let temp = TempDir::new().unwrap();
         let paths = StatePaths::resolve(Some(temp.path().join("api-home"))).unwrap();
         state::init(&paths).unwrap();
@@ -1013,6 +1032,7 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
+        cleanup_hello_service(&repo_root);
         let example = repo_root.join("examples/hello-service");
         let body = json!({"app_path": example.display().to_string()});
 
@@ -1051,6 +1071,8 @@ mod tests {
         .unwrap();
 
         destroy_only(&paths, "hello-service").unwrap();
+        cleanup_hello_service(&repo_root);
+        crate::test_support::cleanup_fzy_io_files();
     }
 
     #[test]

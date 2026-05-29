@@ -22,6 +22,30 @@ enum RouteKind {
     RouteNotFound,
 }
 
+fn route_by_id(route_id: i32) -> RouteKind {
+    if route_id == route_health_id() { return RouteKind::RouteHealth }
+    if route_id == route_services_list_id() { return RouteKind::RouteServicesList }
+    if route_id == route_service_deploy_id() { return RouteKind::RouteServiceDeploy }
+    if route_id == route_service_start_id() { return RouteKind::RouteServiceStart }
+    if route_id == route_service_stop_id() { return RouteKind::RouteServiceStop }
+    if route_id == route_service_restart_id() { return RouteKind::RouteServiceRestart }
+    if route_id == route_service_destroy_id() { return RouteKind::RouteServiceDestroy }
+    if route_id == route_service_inspect_id() { return RouteKind::RouteServiceInspect }
+    if route_id == route_service_logs_id() { return RouteKind::RouteServiceLogs }
+    if route_id == route_service_shell_id() { return RouteKind::RouteServiceShell }
+    if route_id == route_service_snapshot_id() { return RouteKind::RouteServiceSnapshot }
+    if route_id == route_service_rollback_id() { return RouteKind::RouteServiceRollback }
+    if route_id == route_routes_list_id() { return RouteKind::RouteRoutesList }
+    if route_id == route_routes_create_id() { return RouteKind::RouteRoutesCreate }
+    if route_id == route_routes_sign_id() { return RouteKind::RouteRoutesSign }
+    if route_id == route_volumes_list_id() { return RouteKind::RouteVolumesList }
+    if route_id == route_volumes_create_id() { return RouteKind::RouteVolumesCreate }
+    if route_id == route_secrets_list_id() { return RouteKind::RouteSecretsList }
+    if route_id == route_secrets_set_id() { return RouteKind::RouteSecretsSet }
+    if route_id == route_events_list_id() { return RouteKind::RouteEventsList }
+    return RouteKind::RouteNotFound
+}
+
 fn route_health_id() -> i32 { return 1 }
 fn route_services_list_id() -> i32 { return 2 }
 fn route_service_deploy_id() -> i32 { return 3 }

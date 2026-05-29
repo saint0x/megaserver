@@ -1,0 +1,160 @@
+struct Policy {
+    max_body_bytes: i32,
+    require_auth: i32,
+    auth_token: str,
+    require_json_body: i32,
+    enable_rate_limit: i32,
+    rate_capacity: i32,
+}
+
+struct RateState {
+    tokens: i32,
+}
+
+struct GateResult {
+    handled: i32,
+    status: i32,
+    reason: str,
+    rate: RateState,
+}
+
+fn policy(
+    max_body_bytes: i32,
+    require_auth: i32,
+    auth_token: str,
+    require_json_body: i32,
+    enable_rate_limit: i32,
+    rate_capacity: i32,
+) -> Policy {
+    return Policy {
+        max_body_bytes: max_body_bytes,
+        require_auth: require_auth,
+        auth_token: auth_token,
+        require_json_body: require_json_body,
+        enable_rate_limit: enable_rate_limit,
+        rate_capacity: rate_capacity,
+    }
+}
+
+fn rate_state(tokens: i32) -> RateState {
+    return RateState {
+        tokens: tokens,
+    }
+}
+
+fn rate_init(policy: Policy) -> RateState {
+    let mut capacity = policy.rate_capacity
+    if capacity < 1 {
+        capacity = 1
+    }
+    return rate_state(capacity)
+}
+
+fn gate_continue(rate: RateState) -> GateResult {
+    return GateResult {
+        handled: 0,
+        status: 0,
+        reason: "",
+        rate: rate,
+    }
+}
+
+fn gate_handled(status: i32, reason: str, rate: RateState) -> GateResult {
+    return GateResult {
+        handled: 1,
+        status: status,
+        reason: reason,
+        rate: rate,
+    }
+}
+
+fn auth_header_valid(auth_header: str, expected_token: str) -> i32 {
+    if str.starts_with(auth_header, "Bearer ") != 1 {
+        return 0
+    }
+    if expected_token == "" {
+        return 1
+    }
+    let provided = str.slice(auth_header, str.len("Bearer "), str.len(auth_header))
+    if provided == expected_token {
+        return 1
+    }
+    return 0
+}
+
+fn body_is_json_like(text: str) -> i32 {
+    let trimmed = str.trim(text)
+    if trimmed == "" {
+        return 1
+    }
+    if str.starts_with(trimmed, "{") == 1 {
+        return 1
+    }
+    if str.starts_with(trimmed, "[") == 1 {
+        return 1
+    }
+    return 0
+}
+
+fn rate_allowed(state: RateState, cost: i32) -> i32 {
+    let mut spend = cost
+    if spend < 1 {
+        spend = 1
+    }
+    if state.tokens >= spend {
+        return 1
+    }
+    return 0
+}
+
+fn rate_take(state: RateState, cost: i32) -> RateState {
+    let mut spend = cost
+    if spend < 1 {
+        spend = 1
+    }
+    let mut next_tokens = state.tokens
+    if next_tokens >= spend {
+        next_tokens -= spend
+    } else {
+        next_tokens = 0
+    }
+    return rate_state(next_tokens)
+}
+
+fn before_dispatch(
+    req: fzweb.request.RequestEnvelope,
+    app_cfg: fzweb.app.App,
+    decision: fzweb.app.RouteDecision,
+    policy: Policy,
+    state: RateState,
+) -> GateResult {
+    let mut next_state = state
+
+    if policy.require_auth == 1 && fzweb.app.has_middleware(app_cfg, "auth") == 1 && decision.public_route == 0 {
+        if auth_header_valid(req.authorization, policy.auth_token) == 0 {
+            return gate_handled(401, "unauthorized", next_state)
+        }
+    }
+
+    if str.len(req.body) > policy.max_body_bytes {
+        return gate_handled(413, "body_too_large", next_state)
+    }
+
+    if policy.require_json_body == 1 && fzweb.app.has_middleware(app_cfg, "json") == 1 && decision.require_json == 1 {
+        if fzweb.request.content_type_is_json(req) == 0 {
+            return gate_handled(400, "invalid_content_type", next_state)
+        }
+        if body_is_json_like(req.body) == 0 {
+            return gate_handled(400, "invalid_json_body", next_state)
+        }
+    }
+
+    if policy.enable_rate_limit == 1 && fzweb.app.has_middleware(app_cfg, "rate_limit") == 1 && decision.skip_rate == 0 {
+        if rate_allowed(next_state, 1) == 0 {
+            return gate_handled(429, "rate_limited", next_state)
+        }
+        next_state = rate_take(next_state, 1)
+    }
+
+    return gate_continue(next_state)
+}

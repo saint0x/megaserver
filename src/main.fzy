@@ -2,6 +2,7 @@ use core.fs;
 use core.time;
 
 mod api;
+mod fzweb;
 mod model;
 mod runtime;
 mod services;

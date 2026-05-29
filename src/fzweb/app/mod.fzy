@@ -1,0 +1,244 @@
+struct App {
+    service_name: str,
+    service_version: str,
+    routes: ListHandle,
+    middleware: ListHandle,
+}
+
+struct Route {
+    route_id: i32,
+    name: str,
+    method: str,
+    path: str,
+    group: str,
+    public_route: i32,
+    skip_rate: i32,
+    require_json: i32,
+}
+
+struct RouteDecision {
+    route_id: i32,
+    route_name: str,
+    route_path: str,
+    route_group: str,
+    method_allowed: i32,
+    public_route: i32,
+    skip_rate: i32,
+    require_json: i32,
+    params_json: str,
+}
+
+fn route_not_found_id() -> i32 { return 404 }
+
+fn make(service_name: str, service_version: str) -> App {
+    return App {
+        service_name: service_name,
+        service_version: service_version,
+        routes: list.new(),
+        middleware: list.new(),
+    }
+}
+
+fn route(
+    route_id: i32,
+    name: str,
+    method: str,
+    path: str,
+    group: str,
+    public_route: i32,
+    skip_rate: i32,
+    require_json: i32,
+) -> Route {
+    return Route {
+        route_id: route_id,
+        name: name,
+        method: method,
+        path: path,
+        group: group,
+        public_route: public_route,
+        skip_rate: skip_rate,
+        require_json: require_json,
+    }
+}
+
+fn route_catalog_json(item: Route) -> str {
+    let payload = map.new()
+    discard map.set(payload, "route_id", json.str(str.from_i32(item.route_id)))
+    discard map.set(payload, "name", json.str(item.name))
+    discard map.set(payload, "method", json.str(item.method))
+    discard map.set(payload, "path", json.str(item.path))
+    discard map.set(payload, "group", json.str(item.group))
+    discard map.set(payload, "public_route", json.str(str.from_i32(item.public_route)))
+    discard map.set(payload, "skip_rate", json.str(str.from_i32(item.skip_rate)))
+    discard map.set(payload, "require_json", json.str(str.from_i32(item.require_json)))
+    return json.object(payload)
+}
+
+fn route_from_json(raw: str) -> Route {
+    let payload = json.parse(raw)
+    return route(
+        fzweb.request.parse_i32(json.get_str(payload, "route_id")),
+        json.get_str(payload, "name"),
+        json.get_str(payload, "method"),
+        json.get_str(payload, "path"),
+        json.get_str(payload, "group"),
+        fzweb.request.parse_i32(json.get_str(payload, "public_route")),
+        fzweb.request.parse_i32(json.get_str(payload, "skip_rate")),
+        fzweb.request.parse_i32(json.get_str(payload, "require_json")),
+    )
+}
+
+fn route_decision(item: Route, method_allowed: i32, params_json: str) -> RouteDecision {
+    return RouteDecision {
+        route_id: item.route_id,
+        route_name: item.name,
+        route_path: item.path,
+        route_group: item.group,
+        method_allowed: method_allowed,
+        public_route: item.public_route,
+        skip_rate: item.skip_rate,
+        require_json: item.require_json,
+        params_json: params_json,
+    }
+}
+
+fn not_found() -> RouteDecision {
+    return RouteDecision {
+        route_id: route_not_found_id(),
+        route_name: "not_found",
+        route_path: "",
+        route_group: "",
+        method_allowed: 1,
+        public_route: 0,
+        skip_rate: 0,
+        require_json: 0,
+        params_json: "{}",
+    }
+}
+
+fn add_route(app: App, item: Route) -> App {
+    discard list.push(app.routes, route_catalog_json(item))
+    return app
+}
+
+fn use_middleware(app: App, name: str) -> App {
+    discard list.push(app.middleware, name)
+    return app
+}
+
+fn has_middleware(app: App, name: str) -> i32 {
+    let mut idx = 0
+    while idx < list.len(app.middleware) {
+        if list.get(app.middleware, idx) == name {
+            return 1
+        }
+        idx += 1
+    }
+    return 0
+}
+
+fn route_count(app: App) -> i32 {
+    return list.len(app.routes)
+}
+
+fn route_at(app: App, index: i32) -> Route {
+    return route_from_json(list.get(app.routes, index))
+}
+
+fn path_segments(path: str) -> ListHandle {
+    let segments = list.new()
+    let len = str.len(path)
+    let mut idx = 0
+    while idx < len {
+        while idx < len && str.slice(path, idx, idx + 1) == "/" {
+            idx += 1
+        }
+        if idx >= len {
+            return segments
+        }
+        let start = idx
+        while idx < len && str.slice(path, idx, idx + 1) != "/" {
+            idx += 1
+        }
+        discard list.push(segments, str.slice(path, start, idx))
+    }
+    return segments
+}
+
+fn match_path(pattern: str, actual: str) -> str {
+    let pattern_segments = path_segments(pattern)
+    let actual_segments = path_segments(actual)
+    if list.len(pattern_segments) != list.len(actual_segments) {
+        return ""
+    }
+    let params = map.new()
+    let mut idx = 0
+    while idx < list.len(pattern_segments) {
+        let expected = list.get(pattern_segments, idx)
+        let found = list.get(actual_segments, idx)
+        if str.starts_with(expected, ":") == 1 {
+            discard map.set(params, str.slice(expected, 1, str.len(expected)), json.str(found))
+        } else {
+            if expected != found {
+                return ""
+            }
+        }
+        idx += 1
+    }
+    return json.object(params)
+}
+
+fn select(app: App, method: str, path: str) -> RouteDecision {
+    let mut idx = 0
+    while idx < list.len(app.routes) {
+        let item = route_at(app, idx)
+        let params = match_path(item.path, path)
+        if item.method == method && params != "" {
+            return route_decision(item, 1, params)
+        }
+        idx += 1
+    }
+
+    idx = 0
+    while idx < list.len(app.routes) {
+        let item = route_at(app, idx)
+        let params = match_path(item.path, path)
+        if params != "" {
+            return route_decision(item, 0, params)
+        }
+        idx += 1
+    }
+    return not_found()
+}
+
+fn param(decision: RouteDecision, key: str) -> str {
+    return json.get_str(json.parse(decision.params_json), key)
+}
+
+fn openapi_json(app: App) -> str {
+    let routes = list.new()
+    let mut idx = 0
+    while idx < list.len(app.routes) {
+        let item = route_at(app, idx)
+        let route_json = map.new()
+        discard map.set(route_json, "route_id", json.raw(str.from_i32(item.route_id)))
+        discard map.set(route_json, "name", json.str(item.name))
+        discard map.set(route_json, "method", json.str(item.method))
+        discard map.set(route_json, "path", json.str(item.path))
+        discard map.set(route_json, "group", json.str(item.group))
+        discard map.set(route_json, "public", if item.public_route == 1 { json.raw("true") } else { json.raw("false") })
+        discard map.set(route_json, "json_body", if item.require_json == 1 { json.raw("true") } else { json.raw("false") })
+        discard map.set(route_json, "rate_limited", if item.skip_rate == 1 { json.raw("false") } else { json.raw("true") })
+        discard list.push(routes, json.object(route_json))
+        idx += 1
+    }
+    let info = map.new()
+    discard map.set(info, "title", json.str(app.service_name))
+    discard map.set(info, "version", json.str(app.service_version))
+    let root = map.new()
+    discard map.set(root, "openapi", json.str("3.1.0"))
+    discard map.set(root, "framework", json.str("fzweb"))
+    discard map.set(root, "info", json.object(info))
+    discard map.set(root, "routes", json.array(routes))
+    return json.object(root)
+}
