@@ -561,7 +561,10 @@ mod tests {
             return;
         }
 
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = crate::test_support::INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::test_support::cleanup_fzy_io_files();
         let temp = TempDir::new().unwrap();
         let paths = StatePaths::resolve(Some(temp.path().join("reconcile-home"))).unwrap();
         state::init(&paths).unwrap();
