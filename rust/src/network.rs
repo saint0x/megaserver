@@ -421,8 +421,8 @@ pub mod linux {
                     Ok(""),
                 );
             let temp = tempfile::TempDir::new().unwrap();
-            let manager = HostNetworkManager::new(runner.clone())
-                .with_netns_root(temp.path().join("netns"));
+            let manager =
+                HostNetworkManager::new(runner.clone()).with_netns_root(temp.path().join("netns"));
 
             manager
                 .setup_sandbox_network("hello-service", "10.42.0.10")

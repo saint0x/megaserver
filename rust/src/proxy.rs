@@ -347,6 +347,7 @@ fn websocket_accept_key(key: &str) -> String {
 mod tests {
     use super::*;
     use crate::state::{self, StatePaths};
+    use crate::test_support::TEST_LOCK;
     use futures_util::{SinkExt, StreamExt};
     use tempfile::TempDir;
     use tokio::net::TcpListener;
@@ -363,6 +364,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingress_proxies_websockets() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let temp = TempDir::new().unwrap();
         let paths = StatePaths::resolve(Some(temp.path().join("proxy-home"))).unwrap();
         state::init(&paths).unwrap();

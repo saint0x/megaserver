@@ -1,6 +1,7 @@
 use crate::cli::{Cli, Commands, RouteCommands, SecretCommands, VolumeCommands};
 use crate::controlplane;
 use crate::daemon;
+use crate::dns;
 use crate::ingress;
 use crate::manifest::{ServiceManifest, load_manifest};
 use crate::planner;
@@ -43,6 +44,9 @@ pub fn run() -> Result<()> {
         Commands::Daemon(args) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(daemon::serve(paths, args))
+        }
+        Commands::Dns(args) => {
+            dns::serve_forever(paths, args.bind.parse().context("invalid dns bind")?)
         }
     }
 }
@@ -171,7 +175,6 @@ fn sandbox_runtime_dir(paths: &StatePaths, service: &str) -> PathBuf {
 
 fn write_private_hosts_file(
     paths: &StatePaths,
-    conn: &rusqlite::Connection,
     service: &str,
     hostname: &str,
     ip_address: &str,
@@ -183,26 +186,7 @@ fn write_private_hosts_file(
         "127.0.0.1 localhost".to_string(),
         format!("{} gateway.megaserver", crate::network::sandbox_gateway()),
     ];
-    let mut seen = std::collections::HashSet::new();
-
-    for sandbox in state::list_sandboxes(conn)? {
-        if sandbox.status == "stopped" {
-            continue;
-        }
-        let Some(sandbox_ip) = sandbox.ip_address else {
-            continue;
-        };
-        if seen.insert(sandbox.service_name.clone()) {
-            lines.push(format!(
-                "{sandbox_ip} {} {}",
-                sandbox.hostname, sandbox.service_name
-            ));
-        }
-    }
-
-    if seen.insert(service.to_string()) {
-        lines.push(format!("{ip_address} {hostname} {service}"));
-    }
+    lines.push(format!("{ip_address} {hostname} {service}"));
 
     fs::write(runtime_dir.join("hosts"), lines.join("\n") + "\n")?;
     Ok(())
@@ -216,13 +200,7 @@ fn refresh_private_hosts(paths: &StatePaths, conn: &rusqlite::Connection) -> Res
         let Some(ip_address) = sandbox.ip_address.as_deref() else {
             continue;
         };
-        write_private_hosts_file(
-            paths,
-            conn,
-            &sandbox.service_name,
-            &sandbox.hostname,
-            ip_address,
-        )?;
+        write_private_hosts_file(paths, &sandbox.service_name, &sandbox.hostname, ip_address)?;
     }
     Ok(())
 }
@@ -306,7 +284,7 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
             cgroup_path: existing.cgroup_path,
         })?;
     }
-    write_private_hosts_file(paths, &conn, service, &sandbox_hostname, &sandbox_ip_text)?;
+    write_private_hosts_file(paths, service, &sandbox_hostname, &sandbox_ip_text)?;
     let spawned = runtime::spawn_service(
         paths,
         service,
@@ -316,6 +294,16 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
         &volume_env,
         &sandbox_env,
     )?;
+    if let Err(err) = dns::ensure_running(paths) {
+        let _ = runtime::stop_pid(spawned.pid, Duration::from_secs(2));
+        let _ = crate::sandbox::cleanup_sandbox(&crate::sandbox::SandboxLaunchMetadata {
+            service_name: Some(service.to_string()),
+            runtime_kind: spawned.runtime_kind.clone(),
+            isolation_mode: spawned.isolation_mode.clone(),
+            cgroup_path: spawned.cgroup_path.clone(),
+        });
+        return Err(err.context("ensure sandbox dns sidecar"));
+    }
     let sandbox_id = sandbox_id(service, spawned.pid);
     state::update_service_status(&conn, service, "starting", Some(spawned.pid))?;
     state::upsert_sandbox(
@@ -456,6 +444,7 @@ pub fn stop_only(paths: &StatePaths, service: &str) -> Result<()> {
         )?;
     }
     refresh_private_hosts(paths, &conn)?;
+    dns::stop_if_idle(paths)?;
     state::emit_event(
         &conn,
         Some(service),
@@ -498,6 +487,7 @@ pub fn destroy_only(paths: &StatePaths, service: &str) -> Result<()> {
     state::delete_sandbox(&conn, service)?;
     state::delete_service(&conn, service)?;
     refresh_private_hosts(paths, &conn)?;
+    dns::stop_if_idle(paths)?;
     let runtime_dir = paths.service_runtime_dir(service);
     let logs_dir = paths.service_logs_dir(service);
     let _ = fs::remove_dir_all(runtime_dir);
@@ -762,15 +752,21 @@ pub fn rollback_only(paths: &StatePaths, service: &str, snapshot: &str) -> Resul
     let manifest_raw = fs::read_to_string(snapshot_dir.join("manifest.json"))?;
     let manifest: ServiceManifest = serde_json::from_str(&manifest_raw)?;
     let record = load_service(paths, service)?;
-    if let Some(pid) = record.pid {
-        let _ = runtime::stop_pid(pid, Duration::from_secs(5));
+    if record.pid.is_some() || matches!(record.status.as_str(), "healthy" | "degraded" | "starting")
+    {
+        drop(conn);
+        stop_only(paths, service)?;
     }
+    let conn = state::open(paths)?;
 
     for volume in &manifest.volumes {
         let target = paths.volumes_dir.join(volume);
         let _ = fs::remove_dir_all(&target);
         runtime::copy_tree(&snapshot_dir.join("volumes").join(volume), &target)?;
     }
+    let runtime_target = paths.service_runtime_dir(service);
+    let _ = fs::remove_dir_all(&runtime_target);
+    runtime::copy_tree(&snapshot_dir.join("runtime"), &runtime_target)?;
     state::upsert_service(
         &conn,
         service,
@@ -954,12 +950,10 @@ mod tests {
     use super::*;
     use crate::controlplane;
     use crate::state;
+    use crate::test_support::TEST_LOCK;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn init_command_sets_up_home() {

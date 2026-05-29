@@ -198,6 +198,16 @@ mod linux {
             .with_context(|| format!("create sandbox runtime dir {}", runtime_mount.display()))?;
         let hosts_path = runtime_mount.join("hosts");
         let hosts_mount = hosts_path.exists().then_some(hosts_path.clone());
+        let resolv_path = runtime_mount.join("resolv.conf");
+        fs::write(
+            &resolv_path,
+            format!(
+                "nameserver {}\noptions ndots:0 timeout:1 attempts:2\n",
+                crate::network::sandbox_gateway()
+            ),
+        )
+        .with_context(|| format!("write {}", resolv_path.display()))?;
+        let resolv_mount = resolv_path.exists().then_some(resolv_path.clone());
         let netns_name = network::linux::netns_name(service_name);
         network::linux::setup_sandbox_network(service_name, &sandbox_ip)
             .context("prepare sandbox network")?;
@@ -228,6 +238,16 @@ mod linux {
                     mount(
                         Some(hosts_path.as_path()),
                         "/etc/hosts",
+                        None::<&str>,
+                        MsFlags::MS_BIND,
+                        None::<&str>,
+                    )
+                    .map_err(std::io::Error::other)?;
+                }
+                if let Some(resolv_path) = &resolv_mount {
+                    mount(
+                        Some(resolv_path.as_path()),
+                        "/etc/resolv.conf",
                         None::<&str>,
                         MsFlags::MS_BIND,
                         None::<&str>,
@@ -297,13 +317,15 @@ mod linux {
         let sandbox_root = root.join("megaserver");
         fs::create_dir_all(&sandbox_root)
             .with_context(|| format!("create cgroup root {}", sandbox_root.display()))?;
+        validate_cgroup_controllers(root, &sandbox_root)?;
         let cgroup_path = sandbox_root.join(service_name);
         fs::create_dir_all(&cgroup_path)
             .with_context(|| format!("create cgroup {}", cgroup_path.display()))?;
 
         let controllers = sandbox_root.join("cgroup.subtree_control");
         if controllers.exists() {
-            let _ = fs::write(&controllers, "+memory +cpu +pids");
+            fs::write(&controllers, "+memory +cpu +pids")
+                .with_context(|| format!("enable controllers in {}", controllers.display()))?;
         }
 
         let resources = resource_config(manifest)?;
@@ -324,10 +346,38 @@ mod linux {
             let _ = fs::write(cgroup_path.join("cpu.weight"), cpu_weight.to_string());
         }
         if let Some(pids_limit) = resources.pids_limit {
-            let _ = fs::write(cgroup_path.join("pids.max"), pids_limit.to_string());
+            fs::write(cgroup_path.join("pids.max"), pids_limit.to_string())
+                .with_context(|| format!("write pids.max for {}", cgroup_path.display()))?;
         }
 
         Ok(Some(cgroup_path))
+    }
+
+    fn validate_cgroup_controllers(root: &Path, sandbox_root: &Path) -> Result<()> {
+        let available = fs::read_to_string(root.join("cgroup.controllers"))
+            .context("read cgroup.controllers")?;
+        for controller in ["memory", "cpu", "pids"] {
+            if !available
+                .split_whitespace()
+                .any(|entry| entry == controller)
+            {
+                anyhow::bail!("linux sandboxing requires cgroup controller `{controller}`");
+            }
+        }
+        let control = sandbox_root.join("cgroup.subtree_control");
+        if control.exists() {
+            let parent_type = root.join("cgroup.type");
+            if parent_type.exists() {
+                let kind = fs::read_to_string(parent_type).unwrap_or_default();
+                if kind.trim() != "domain" && !kind.trim().is_empty() {
+                    anyhow::bail!(
+                        "linux sandboxing requires domain cgroup at {}",
+                        root.display()
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     fn join_cgroup(cgroup_path: &Path) -> Result<()> {

@@ -35,6 +35,8 @@ pub enum Commands {
     Events(EventsArgs),
     Shell(ShellArgs),
     Daemon(DaemonArgs),
+    #[command(hide = true)]
+    Dns(DnsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -157,4 +159,10 @@ pub struct DaemonArgs {
     pub tls_key: Option<PathBuf>,
     #[arg(long)]
     pub tls_ca: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct DnsArgs {
+    #[arg(long, default_value = "10.42.0.254:53")]
+    pub bind: String,
 }

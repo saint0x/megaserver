@@ -414,6 +414,28 @@ async fn reconcile_once(state: &Arc<DaemonState>) -> Result<()> {
             let alive = crate::runtime::process_alive(pid);
             let conn = state::open(&state.paths)?;
             if !alive && service.status != "stopped" {
+                if let Some(sandbox) = state::sandbox_by_service(&conn, &service.name)? {
+                    crate::sandbox::cleanup_sandbox(&crate::sandbox::SandboxLaunchMetadata {
+                        service_name: Some(service.name.clone()),
+                        runtime_kind: sandbox.runtime_kind.clone(),
+                        isolation_mode: sandbox.isolation_mode.clone(),
+                        cgroup_path: sandbox.cgroup_path.clone(),
+                    })?;
+                    state::upsert_sandbox(
+                        &conn,
+                        state::SandboxUpsert {
+                            service_name: &service.name,
+                            sandbox_id: &sandbox.sandbox_id,
+                            hostname: &sandbox.hostname,
+                            ip_address: sandbox.ip_address.as_deref(),
+                            runtime_kind: &sandbox.runtime_kind,
+                            isolation_mode: &sandbox.isolation_mode,
+                            status: "stopped",
+                            pid: None,
+                            cgroup_path: None,
+                        },
+                    )?;
+                }
                 state::update_service_status(&conn, &service.name, "failed", None)?;
                 state::emit_event(
                     &conn,
@@ -447,6 +469,7 @@ async fn reconcile_once(state: &Arc<DaemonState>) -> Result<()> {
             }
         }
     }
+    crate::dns::stop_if_idle(&state.paths)?;
     Ok(())
 }
 
@@ -458,6 +481,7 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
 mod tests {
     use super::*;
     use crate::cli::DaemonArgs;
+    use crate::test_support::TEST_LOCK;
     use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
     use reqwest::Certificate;
     use reqwest::Client;
@@ -466,10 +490,7 @@ mod tests {
     use std::net::IpAddr;
     use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn free_port() -> u16 {
         TcpListener::bind("127.0.0.1:0")
