@@ -1,6 +1,6 @@
 use crate::model::{
-    EventRecord, RouteRecord, SandboxRecord, SecretRecord, ServiceRecord, SnapshotRecord,
-    VolumeRecord,
+    DeploymentRecord, EventRecord, ProjectRecord, RouteRecord, SandboxRecord, SecretRecord,
+    ServiceRecord, SnapshotRecord, VolumeRecord,
 };
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -15,6 +15,7 @@ pub struct StatePaths {
     pub home: PathBuf,
     pub db_path: PathBuf,
     pub logs_dir: PathBuf,
+    pub projects_dir: PathBuf,
     pub run_dir: PathBuf,
     pub volumes_dir: PathBuf,
     pub snapshots_dir: PathBuf,
@@ -32,6 +33,7 @@ impl StatePaths {
         let db_path = home.join("state/megaserver.db");
         Ok(Self {
             logs_dir: home.join("logs"),
+            projects_dir: home.join("projects"),
             run_dir: home.join("run"),
             volumes_dir: home.join("volumes"),
             snapshots_dir: home.join("snapshots"),
@@ -44,6 +46,7 @@ impl StatePaths {
         for dir in [
             &self.home,
             &self.logs_dir,
+            &self.projects_dir,
             &self.run_dir,
             &self.volumes_dir,
             &self.snapshots_dir,
@@ -86,6 +89,28 @@ pub fn init(paths: &StatePaths) -> Result<()> {
             service_name TEXT NOT NULL,
             manifest_json TEXT NOT NULL,
             plan_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            service_name TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            app_path TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS deployment_releases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            app_path TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS routes (
@@ -190,6 +215,191 @@ pub fn insert_deployment(
         params![service_name, manifest_json, plan_json, now_string()],
     )?;
     Ok(())
+}
+
+pub fn upsert_project(
+    conn: &Connection,
+    name: &str,
+    service_name: &str,
+    source_kind: &str,
+    source_ref: &str,
+    app_path: &Path,
+    manifest_json: &str,
+) -> Result<()> {
+    let now = now_string();
+    conn.execute(
+        "
+        INSERT INTO projects(name, service_name, source_kind, source_ref, app_path, manifest_json, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+        ON CONFLICT(name) DO UPDATE SET
+            service_name = excluded.service_name,
+            source_kind = excluded.source_kind,
+            source_ref = excluded.source_ref,
+            app_path = excluded.app_path,
+            manifest_json = excluded.manifest_json,
+            updated_at = excluded.updated_at
+        ",
+        params![
+            name,
+            service_name,
+            source_kind,
+            source_ref,
+            app_path.to_string_lossy(),
+            manifest_json,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn project_by_name(conn: &Connection, name: &str) -> Result<Option<ProjectRecord>> {
+    conn.query_row(
+        "
+        SELECT id, name, service_name, source_kind, source_ref, app_path, manifest_json, created_at, updated_at
+        FROM projects
+        WHERE name = ?1
+        ",
+        params![name],
+        |row| {
+            Ok(ProjectRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                service_name: row.get(2)?,
+                source_kind: row.get(3)?,
+                source_ref: row.get(4)?,
+                app_path: row.get(5)?,
+                manifest_json: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn list_projects(conn: &Connection) -> Result<Vec<ProjectRecord>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT id, name, service_name, source_kind, source_ref, app_path, manifest_json, created_at, updated_at
+        FROM projects
+        ORDER BY name
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ProjectRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            service_name: row.get(2)?,
+            source_kind: row.get(3)?,
+            source_ref: row.get(4)?,
+            app_path: row.get(5)?,
+            manifest_json: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn insert_deployment_release(
+    conn: &Connection,
+    project_name: &str,
+    service_name: &str,
+    app_path: &Path,
+    manifest_json: &str,
+    plan_json: &str,
+    source_kind: &str,
+    source_ref: &str,
+) -> Result<()> {
+    conn.execute(
+        "
+        INSERT INTO deployment_releases(project_name, service_name, app_path, manifest_json, plan_json, source_kind, source_ref, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ",
+        params![
+            project_name,
+            service_name,
+            app_path.to_string_lossy(),
+            manifest_json,
+            plan_json,
+            source_kind,
+            source_ref,
+            now_string()
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_deployment_releases(
+    conn: &Connection,
+    project_name: Option<&str>,
+    service_name: Option<&str>,
+) -> Result<Vec<DeploymentRecord>> {
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok(DeploymentRecord {
+            id: row.get(0)?,
+            project_name: row.get(1)?,
+            service_name: row.get(2)?,
+            app_path: row.get(3)?,
+            manifest_json: row.get(4)?,
+            plan_json: row.get(5)?,
+            source_kind: row.get(6)?,
+            source_ref: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    };
+    let rows = match (project_name, service_name) {
+        (Some(project), Some(service)) => {
+            let mut stmt = conn.prepare(
+                "
+                SELECT id, project_name, service_name, app_path, manifest_json, plan_json, source_kind, source_ref, created_at
+                FROM deployment_releases
+                WHERE project_name = ?1 AND service_name = ?2
+                ORDER BY id DESC
+                ",
+            )?;
+            stmt.query_map(params![project, service], map_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        }
+        (Some(project), None) => {
+            let mut stmt = conn.prepare(
+                "
+                SELECT id, project_name, service_name, app_path, manifest_json, plan_json, source_kind, source_ref, created_at
+                FROM deployment_releases
+                WHERE project_name = ?1
+                ORDER BY id DESC
+                ",
+            )?;
+            stmt.query_map(params![project], map_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        }
+        (None, Some(service)) => {
+            let mut stmt = conn.prepare(
+                "
+                SELECT id, project_name, service_name, app_path, manifest_json, plan_json, source_kind, source_ref, created_at
+                FROM deployment_releases
+                WHERE service_name = ?1
+                ORDER BY id DESC
+                ",
+            )?;
+            stmt.query_map(params![service], map_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        }
+        (None, None) => {
+            let mut stmt = conn.prepare(
+                "
+                SELECT id, project_name, service_name, app_path, manifest_json, plan_json, source_kind, source_ref, created_at
+                FROM deployment_releases
+                ORDER BY id DESC
+                ",
+            )?;
+            stmt.query_map([], map_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        }
+    };
+    Ok(rows)
 }
 
 pub fn upsert_service(

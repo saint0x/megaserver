@@ -5,6 +5,8 @@ use std::env;
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 use url::form_urlencoded;
 
 static LAST_ERROR: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
@@ -37,6 +39,9 @@ fn set_last_error(message: &str) {
 }
 
 fn host_input_path() -> PathBuf {
+    if let Some(path) = env::var_os("MEGASERVER_FZY_HOST_INPUT").map(PathBuf::from) {
+        return path;
+    }
     sibling_of_control_path(
         "MEGASERVER_FZY_CONTROL_INPUT",
         "megaserver.fzy.control.input.json",
@@ -44,7 +49,16 @@ fn host_input_path() -> PathBuf {
     )
 }
 
+fn control_input_path() -> PathBuf {
+    env::var_os("MEGASERVER_FZY_CONTROL_INPUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/tmp/megaserver.fzy.control.input.json"))
+}
+
 fn host_output_path() -> PathBuf {
+    if let Some(path) = env::var_os("MEGASERVER_FZY_HOST_OUTPUT").map(PathBuf::from) {
+        return path;
+    }
     sibling_of_control_path(
         "MEGASERVER_FZY_CONTROL_OUTPUT",
         "megaserver.fzy.control.output.json",
@@ -64,6 +78,25 @@ fn sibling_of_control_path(
         .parent()
         .map(|parent| parent.join(sibling_name))
         .unwrap_or_else(|| PathBuf::from(format!("/var/tmp/{sibling_name}")))
+}
+
+fn read_host_request_text() -> std::io::Result<String> {
+    let path = host_input_path();
+    let mut last = String::new();
+    for _ in 0..20 {
+        let text = std::fs::read_to_string(&path)?;
+        if !text.trim().is_empty() {
+            return Ok(text);
+        }
+        last = text;
+        thread::sleep(Duration::from_millis(5));
+    }
+    if let Ok(control_text) = std::fs::read_to_string(control_input_path())
+        && !control_text.trim().is_empty()
+    {
+        return Ok(control_text);
+    }
+    Ok(last)
 }
 
 fn resolve_paths(request: &Value) -> anyhow::Result<StatePaths> {
@@ -156,7 +189,7 @@ fn http_response(status: u16, body: Value) -> Value {
     })
 }
 
-fn dispatch_http_value(request: &Value) -> anyhow::Result<Value> {
+fn http_action_request(request: &Value) -> anyhow::Result<Value> {
     let method = request
         .get("method")
         .and_then(Value::as_str)
@@ -199,6 +232,32 @@ fn dispatch_http_value(request: &Value) -> anyhow::Result<Value> {
             "expires_in": body.get("expires_in").cloned().unwrap_or(Value::from(300_u64)),
             "scheme": body.get("scheme").cloned().unwrap_or(Value::String("https".to_string())),
         }),
+        ("GET", "/v1/projects") => json!({"home": request["home"], "action": "project_list"}),
+        ("POST", "/v1/projects/import") => {
+            let mut payload = json!({
+                "home": request["home"],
+                "action": "project_import",
+                "source_path": json_string_field(&body, "source_path")?,
+            });
+            if let Some(project) = body.get("project").and_then(Value::as_str) {
+                payload["project"] = Value::String(project.to_string());
+            }
+            payload
+        }
+        ("POST", "/v1/projects/upload") => {
+            let mut payload = json!({
+                "home": request["home"],
+                "action": "project_upload",
+                "archive_base64": json_string_field(&body, "archive_base64")?,
+            });
+            if let Some(format) = body.get("format").and_then(Value::as_str) {
+                payload["format"] = Value::String(format.to_string());
+            }
+            if let Some(project) = body.get("project").and_then(Value::as_str) {
+                payload["project"] = Value::String(project.to_string());
+            }
+            payload
+        }
         ("GET", "/v1/volumes") => json!({"home": request["home"], "action": "volume_list"}),
         ("POST", "/v1/volumes") => {
             let mut payload = json!({
@@ -229,6 +288,27 @@ fn dispatch_http_value(request: &Value) -> anyhow::Result<Value> {
             let mut payload = json!({"home": request["home"], "action": "events"});
             if let Some(service) = query.get("service").and_then(Value::as_str) {
                 payload["service"] = Value::String(service.to_string());
+            }
+            payload
+        }
+        ("GET", "/v1/deployments") => {
+            let mut payload = json!({"home": request["home"], "action": "deployment_list"});
+            if let Some(project) = query.get("project").and_then(Value::as_str) {
+                payload["project"] = Value::String(project.to_string());
+            }
+            if let Some(service) = query.get("service").and_then(Value::as_str) {
+                payload["service"] = Value::String(service.to_string());
+            }
+            payload
+        }
+        ("POST", "/v1/deployments") => {
+            let mut payload = json!({
+                "home": request["home"],
+                "action": "deployment_create",
+                "project": json_string_field(&body, "project")?,
+            });
+            if let Some(start) = body.get("start") {
+                payload["start"] = start.clone();
             }
             payload
         }
@@ -293,7 +373,16 @@ fn dispatch_http_value(request: &Value) -> anyhow::Result<Value> {
         }
     };
 
-    match dispatch_value(&action_request) {
+    Ok(action_request)
+}
+
+fn dispatch_http_action_value(request: &Value) -> anyhow::Result<Value> {
+    let action_request = http_action_request(request)?;
+    dispatch_value(&action_request)
+}
+
+fn dispatch_http_value(request: &Value) -> anyhow::Result<Value> {
+    match dispatch_http_action_value(request) {
         Ok(value) => Ok(http_response(200, value)),
         Err(err) => Ok(http_response(
             400,
@@ -465,6 +554,27 @@ fn dispatch_value(request: &Value) -> anyhow::Result<Value> {
                 .unwrap_or("https");
             app::signed_link_value(&paths, service, domain, path, expires_in, scheme)
         }
+        "project_list" => crate::projects::list_projects_value(&paths),
+        "project_import" => {
+            let source_path = request
+                .get("source_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing source_path"))?;
+            let project = request.get("project").and_then(Value::as_str);
+            crate::projects::import_project_value(&paths, Path::new(source_path), project)
+        }
+        "project_upload" => {
+            let archive_base64 = request
+                .get("archive_base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing archive_base64"))?;
+            let format = request
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("tar.gz");
+            let project = request.get("project").and_then(Value::as_str);
+            crate::projects::upload_project_value(&paths, archive_base64, format, project)
+        }
         "volume_create" => {
             let name = request
                 .get("name")
@@ -476,6 +586,22 @@ fn dispatch_value(request: &Value) -> anyhow::Result<Value> {
         "volume_list" => {
             let conn = state::open(&paths)?;
             Ok(json!(state::list_volumes(&conn)?))
+        }
+        "deployment_list" => {
+            let project = request.get("project").and_then(Value::as_str);
+            let service = request.get("service").and_then(Value::as_str);
+            crate::projects::list_deployments_value(&paths, project, service)
+        }
+        "deployment_create" => {
+            let project = request
+                .get("project")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing project"))?;
+            let start = request
+                .get("start")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            crate::projects::deploy_project_value(&paths, project, start)
         }
         "secret_set" => {
             let service = request
@@ -583,7 +709,7 @@ pub extern "C" fn megaserver_host_last_error_message() -> *const c_char {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn megaserver_host_dispatch() -> i32 {
-    let request_text = match std::fs::read_to_string(host_input_path()) {
+    let request_text = match read_host_request_text() {
         Ok(text) => text,
         Err(err) => {
             set_last_error(&format!("read control input failed: {err}"));
@@ -607,7 +733,13 @@ pub extern "C" fn megaserver_host_dispatch() -> i32 {
         }
     };
 
-    match dispatch_value(&request) {
+    let response = if request.get("method").is_some() {
+        dispatch_http_action_value(&request)
+    } else {
+        dispatch_value(&request)
+    };
+
+    match response {
         Ok(value) => {
             if let Err(err) = std::fs::write(host_output_path(), value.to_string()) {
                 set_last_error(&format!("write control output failed: {err}"));

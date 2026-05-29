@@ -827,9 +827,9 @@ pub mod linux {
             assert!(calls.contains(
                 &"iptables -A MEGASERVER-FORWARD -i megabr0 -o megabr0 -j ACCEPT".to_string()
             ));
-            assert!(calls.contains(
-                &"iptables -A MEGASERVER-FORWARD -i megabr0 -j ACCEPT".to_string()
-            ));
+            assert!(
+                calls.contains(&"iptables -A MEGASERVER-FORWARD -i megabr0 -j ACCEPT".to_string())
+            );
             assert!(calls.contains(
                 &"iptables -A MEGASERVER-FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT".to_string()
             ));

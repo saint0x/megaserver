@@ -4,9 +4,12 @@ use std::cell::Cell;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 static FZY_LOCK: Mutex<()> = Mutex::new(());
+static FZY_SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(1);
+static FZY_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 thread_local! {
     static FZY_DEPTH: Cell<usize> = const { Cell::new(0) };
@@ -20,8 +23,6 @@ struct FzyRuntimeGuard<'a> {
 
 unsafe extern "C" {
     fn fz_host_init() -> i32;
-    fn fz_host_shutdown() -> i32;
-    fn fz_host_cleanup() -> i32;
     fn fz_host_last_error_message() -> *const std::ffi::c_char;
     fn megaserver_fzy_schema_version() -> i32;
     fn megaserver_fzy_plan_manifest() -> i32;
@@ -32,10 +33,6 @@ impl Drop for FzyRuntimeGuard<'_> {
     fn drop(&mut self) {
         if self.outermost {
             FZY_DEPTH.with(|slot| slot.set(0));
-            unsafe {
-                let _ = fz_host_shutdown();
-                let _ = fz_host_cleanup();
-            }
         } else {
             FZY_DEPTH.with(|slot| slot.set(self.previous_depth));
         }
@@ -55,9 +52,9 @@ fn enter_fzy_runtime() -> FzyRuntimeGuard<'static> {
     }
 
     let guard = FZY_LOCK.lock().expect("fzy lock poisoned");
-    unsafe {
+    FZY_INIT.get_or_init(|| unsafe {
         let _ = fz_host_init();
-    }
+    });
     FZY_DEPTH.with(|slot| slot.set(1));
     FzyRuntimeGuard {
         outermost: true,
@@ -76,14 +73,15 @@ pub fn planner_schema_version() -> i32 {
 }
 
 pub fn run_planner_with_io(input_payload: &str, output_path: &Path) -> std::io::Result<i32> {
-    let planner_input = scratch_path("megaserver.fzy.plan.input.json");
-    let planner_output = scratch_path("megaserver.fzy.plan.output.json");
-    fs::create_dir_all(planner_input.parent().expect("planner input parent"))?;
-    unsafe {
-        env::set_var("MEGASERVER_FZY_PLAN_INPUT", &planner_input);
-        env::set_var("MEGASERVER_FZY_PLAN_OUTPUT", &planner_output);
-    }
+    let scratch_dir = unique_scratch_dir();
+    let planner_input = scratch_dir.join("megaserver.fzy.plan.input.json");
+    let planner_output = scratch_dir.join("megaserver.fzy.plan.output.json");
+    fs::create_dir_all(&scratch_dir)?;
     with_fzy_runtime(|| {
+        unsafe {
+            env::set_var("MEGASERVER_FZY_PLAN_INPUT", &planner_input);
+            env::set_var("MEGASERVER_FZY_PLAN_OUTPUT", &planner_output);
+        }
         fs::write(&planner_input, input_payload)?;
         let _ = fs::remove_file(&planner_output);
         let code = unsafe { megaserver_fzy_plan_manifest() };
@@ -96,19 +94,19 @@ pub fn run_planner_with_io(input_payload: &str, output_path: &Path) -> std::io::
 
 pub fn dispatch_control(payload: &Value) -> Result<Value> {
     let input = serde_json::to_string(payload)?;
-    let control_input = scratch_path("megaserver.fzy.control.input.json");
-    let control_output = scratch_path("megaserver.fzy.control.output.json");
-    let host_input = scratch_path("megaserver.fzy.host.input.json");
-    let host_output = scratch_path("megaserver.fzy.host.output.json");
-    fs::create_dir_all(control_input.parent().expect("control input parent"))
-        .context("create Fzy control scratch dir")?;
-    unsafe {
-        env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
-        env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
-        env::remove_var("MEGASERVER_FZY_HOST_INPUT");
-        env::remove_var("MEGASERVER_FZY_HOST_OUTPUT");
-    }
+    let scratch_dir = unique_scratch_dir();
+    let control_input = scratch_dir.join("megaserver.fzy.control.input.json");
+    let control_output = scratch_dir.join("megaserver.fzy.control.output.json");
+    let host_input = scratch_dir.join("megaserver.fzy.host.input.json");
+    let host_output = scratch_dir.join("megaserver.fzy.host.output.json");
+    fs::create_dir_all(&scratch_dir).context("create Fzy control scratch dir")?;
     with_fzy_runtime(|| {
+        unsafe {
+            env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
+            env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
+            env::set_var("MEGASERVER_FZY_HOST_INPUT", &host_input);
+            env::set_var("MEGASERVER_FZY_HOST_OUTPUT", &host_output);
+        }
         fs::write(&control_input, input).context("write Fzy control input")?;
         let _ = fs::remove_file(&control_output);
         let _ = fs::remove_file(&host_input);
@@ -125,10 +123,9 @@ pub fn dispatch_control(payload: &Value) -> Result<Value> {
     })
 }
 
-fn scratch_path(file_name: &str) -> PathBuf {
-    env::temp_dir()
-        .join(format!("megaserver-fzy-{}", std::process::id()))
-        .join(file_name)
+fn unique_scratch_dir() -> PathBuf {
+    let slot = FZY_SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    env::temp_dir().join(format!("megaserver-fzy-{}-{slot}", std::process::id()))
 }
 
 pub fn last_error_message() -> String {

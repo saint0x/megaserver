@@ -14,8 +14,13 @@ enum RouteKind {
     RouteRoutesList,
     RouteRoutesCreate,
     RouteRoutesSign,
+    RouteProjectsList,
+    RouteProjectsImport,
+    RouteProjectsUpload,
     RouteVolumesList,
     RouteVolumesCreate,
+    RouteDeploymentsList,
+    RouteDeploymentsCreate,
     RouteSecretsList,
     RouteSecretsSet,
     RouteEventsList,
@@ -38,8 +43,13 @@ fn route_by_id(route_id: i32) -> RouteKind {
     if route_id == route_routes_list_id() { return RouteKind::RouteRoutesList }
     if route_id == route_routes_create_id() { return RouteKind::RouteRoutesCreate }
     if route_id == route_routes_sign_id() { return RouteKind::RouteRoutesSign }
+    if route_id == route_projects_list_id() { return RouteKind::RouteProjectsList }
+    if route_id == route_projects_import_id() { return RouteKind::RouteProjectsImport }
+    if route_id == route_projects_upload_id() { return RouteKind::RouteProjectsUpload }
     if route_id == route_volumes_list_id() { return RouteKind::RouteVolumesList }
     if route_id == route_volumes_create_id() { return RouteKind::RouteVolumesCreate }
+    if route_id == route_deployments_list_id() { return RouteKind::RouteDeploymentsList }
+    if route_id == route_deployments_create_id() { return RouteKind::RouteDeploymentsCreate }
     if route_id == route_secrets_list_id() { return RouteKind::RouteSecretsList }
     if route_id == route_secrets_set_id() { return RouteKind::RouteSecretsSet }
     if route_id == route_events_list_id() { return RouteKind::RouteEventsList }
@@ -66,6 +76,11 @@ fn route_secrets_list_id() -> i32 { return 17 }
 fn route_secrets_set_id() -> i32 { return 18 }
 fn route_events_list_id() -> i32 { return 19 }
 fn route_routes_sign_id() -> i32 { return 20 }
+fn route_projects_list_id() -> i32 { return 21 }
+fn route_projects_import_id() -> i32 { return 22 }
+fn route_projects_upload_id() -> i32 { return 23 }
+fn route_deployments_list_id() -> i32 { return 24 }
+fn route_deployments_create_id() -> i32 { return 25 }
 fn route_not_found_id() -> i32 { return 404 }
 
 fn route_id(kind: RouteKind) -> i32 {
@@ -85,8 +100,13 @@ fn route_id(kind: RouteKind) -> i32 {
         RouteKind::RouteRoutesList => return route_routes_list_id(),
         RouteKind::RouteRoutesCreate => return route_routes_create_id(),
         RouteKind::RouteRoutesSign => return route_routes_sign_id(),
+        RouteKind::RouteProjectsList => return route_projects_list_id(),
+        RouteKind::RouteProjectsImport => return route_projects_import_id(),
+        RouteKind::RouteProjectsUpload => return route_projects_upload_id(),
         RouteKind::RouteVolumesList => return route_volumes_list_id(),
         RouteKind::RouteVolumesCreate => return route_volumes_create_id(),
+        RouteKind::RouteDeploymentsList => return route_deployments_list_id(),
+        RouteKind::RouteDeploymentsCreate => return route_deployments_create_id(),
         RouteKind::RouteSecretsList => return route_secrets_list_id(),
         RouteKind::RouteSecretsSet => return route_secrets_set_id(),
         RouteKind::RouteEventsList => return route_events_list_id(),
@@ -112,8 +132,13 @@ fn route_name(kind: RouteKind) -> str {
         RouteKind::RouteRoutesList => return "route_list",
         RouteKind::RouteRoutesCreate => return "route_add",
         RouteKind::RouteRoutesSign => return "route_sign",
+        RouteKind::RouteProjectsList => return "project_list",
+        RouteKind::RouteProjectsImport => return "project_import",
+        RouteKind::RouteProjectsUpload => return "project_upload",
         RouteKind::RouteVolumesList => return "volume_list",
         RouteKind::RouteVolumesCreate => return "volume_create",
+        RouteKind::RouteDeploymentsList => return "deployment_list",
+        RouteKind::RouteDeploymentsCreate => return "deployment_create",
         RouteKind::RouteSecretsList => return "secret_list",
         RouteKind::RouteSecretsSet => return "secret_set",
         RouteKind::RouteEventsList => return "event_list",
@@ -139,8 +164,13 @@ fn route_prefix(kind: RouteKind) -> str {
         RouteKind::RouteRoutesList => return "/v1/routes",
         RouteKind::RouteRoutesCreate => return "/v1/routes",
         RouteKind::RouteRoutesSign => return "/v1/routes",
+        RouteKind::RouteProjectsList => return "/v1/projects",
+        RouteKind::RouteProjectsImport => return "/v1/projects",
+        RouteKind::RouteProjectsUpload => return "/v1/projects",
         RouteKind::RouteVolumesList => return "/v1/volumes",
         RouteKind::RouteVolumesCreate => return "/v1/volumes",
+        RouteKind::RouteDeploymentsList => return "/v1/deployments",
+        RouteKind::RouteDeploymentsCreate => return "/v1/deployments",
         RouteKind::RouteSecretsList => return "/v1/secrets",
         RouteKind::RouteSecretsSet => return "/v1/secrets",
         RouteKind::RouteEventsList => return "/v1/events",
@@ -164,7 +194,7 @@ fn route_skip_rate(kind: RouteKind) -> i32 {
 }
 
 fn route_require_json(kind: RouteKind) -> i32 {
-    if kind == RouteKind::RouteServiceDeploy || kind == RouteKind::RouteServiceShell || kind == RouteKind::RouteRoutesCreate || kind == RouteKind::RouteRoutesSign || kind == RouteKind::RouteVolumesCreate || kind == RouteKind::RouteSecretsSet {
+    if kind == RouteKind::RouteServiceDeploy || kind == RouteKind::RouteServiceShell || kind == RouteKind::RouteRoutesCreate || kind == RouteKind::RouteRoutesSign || kind == RouteKind::RouteProjectsImport || kind == RouteKind::RouteProjectsUpload || kind == RouteKind::RouteVolumesCreate || kind == RouteKind::RouteDeploymentsCreate || kind == RouteKind::RouteSecretsSet {
         return 1
     }
     return 0
@@ -216,11 +246,26 @@ fn route_kind(method: str, path: str) -> RouteKind {
     if method == "POST" && path == "/v1/routes/signed-link" {
         return RouteKind::RouteRoutesSign
     }
+    if method == "GET" && path == "/v1/projects" {
+        return RouteKind::RouteProjectsList
+    }
+    if method == "POST" && path == "/v1/projects/import" {
+        return RouteKind::RouteProjectsImport
+    }
+    if method == "POST" && path == "/v1/projects/upload" {
+        return RouteKind::RouteProjectsUpload
+    }
     if method == "GET" && path == "/v1/volumes" {
         return RouteKind::RouteVolumesList
     }
     if method == "POST" && path == "/v1/volumes" {
         return RouteKind::RouteVolumesCreate
+    }
+    if method == "GET" && path == "/v1/deployments" {
+        return RouteKind::RouteDeploymentsList
+    }
+    if method == "POST" && path == "/v1/deployments" {
+        return RouteKind::RouteDeploymentsCreate
     }
     if method == "GET" && path == "/v1/secrets" {
         return RouteKind::RouteSecretsList

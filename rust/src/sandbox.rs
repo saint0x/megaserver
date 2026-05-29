@@ -479,10 +479,10 @@ mod linux {
                 true,
             )?;
         }
-        if Path::new("/etc/nsswitch.conf").exists() {
+        if Path::new("/etc/localtime").exists() {
             bind_path_into_root(
-                Path::new("/etc/nsswitch.conf"),
-                &args.sandbox_root.join("etc").join("nsswitch.conf"),
+                Path::new("/etc/localtime"),
+                &args.sandbox_root.join("etc").join("localtime"),
                 true,
             )?;
         }
@@ -511,10 +511,34 @@ mod linux {
             Some("tmpfs"),
             &args.sandbox_root.join("tmp"),
             Some("tmpfs"),
-            MsFlags::empty(),
+            MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
             Some("mode=1777,size=64m"),
         )
         .context("mount sandbox tmpfs")?;
+        mount(
+            Some("tmpfs"),
+            &args.sandbox_root.join("run"),
+            Some("tmpfs"),
+            MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+            Some("mode=0755,size=16m"),
+        )
+        .context("mount sandbox run tmpfs")?;
+        mount(
+            Some("tmpfs"),
+            &args.sandbox_root.join("var").join("tmp"),
+            Some("tmpfs"),
+            MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+            Some("mode=1777,size=32m"),
+        )
+        .context("mount sandbox var tmpfs")?;
+        mount(
+            Some("tmpfs"),
+            &args.sandbox_root.join("dev").join("shm"),
+            Some("tmpfs"),
+            MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+            Some("mode=1777,size=32m"),
+        )
+        .context("mount sandbox shm tmpfs")?;
         mount(
             Some(args.workspace_app.as_path()),
             &args.sandbox_root.join("srv").join("app"),
@@ -746,6 +770,10 @@ mod linux {
             root.join("run"),
             root.join("var"),
             root.join("var").join("run"),
+            root.join("var").join("tmp"),
+            root.join("dev").join("shm"),
+            root.join("root"),
+            root.join("home"),
         ] {
             fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         }
@@ -758,6 +786,28 @@ mod linux {
         if Path::new("/lib64").exists() {
             fs::create_dir_all(root.join("lib64"))?;
         }
+        write_sandbox_etc_files(root)?;
+        Ok(())
+    }
+
+    fn write_sandbox_etc_files(root: &Path) -> Result<()> {
+        let etc = root.join("etc");
+        fs::write(
+            etc.join("passwd"),
+            "root:x:0:0:root:/root:/sbin/nologin\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n",
+        )
+        .with_context(|| format!("write {}", etc.join("passwd").display()))?;
+        fs::write(etc.join("group"), "root:x:0:\nnogroup:x:65534:\n")
+            .with_context(|| format!("write {}", etc.join("group").display()))?;
+        fs::write(
+            etc.join("nsswitch.conf"),
+            "passwd: files\ngroup: files\nshadow: files\nhosts: files dns\nnetworks: files\nprotocols: files\nservices: files\nethers: files\nrpc: files\n",
+        )
+        .with_context(|| format!("write {}", etc.join("nsswitch.conf").display()))?;
+        fs::write(etc.join("hostname"), "sandbox.megaserver\n")
+            .with_context(|| format!("write {}", etc.join("hostname").display()))?;
+        fs::write(etc.join("host.conf"), "multi on\n")
+            .with_context(|| format!("write {}", etc.join("host.conf").display()))?;
         Ok(())
     }
 
@@ -862,12 +912,17 @@ mod tests {
         super::linux::prepare_sandbox_root(&root).unwrap();
         for path in [
             root.join("etc"),
+            root.join("etc").join("passwd"),
+            root.join("etc").join("group"),
+            root.join("etc").join("nsswitch.conf"),
             root.join("srv").join("app"),
             root.join("dev"),
+            root.join("dev").join("shm"),
             root.join("proc"),
             root.join("tmp"),
             root.join("run"),
             root.join("var").join("run"),
+            root.join("var").join("tmp"),
         ] {
             assert!(path.exists(), "missing {}", path.display());
         }

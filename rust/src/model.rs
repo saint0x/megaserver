@@ -17,6 +17,32 @@ pub struct ServiceRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRecord {
+    pub id: i64,
+    pub name: String,
+    pub service_name: String,
+    pub source_kind: String,
+    pub source_ref: String,
+    pub app_path: String,
+    pub manifest_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentRecord {
+    pub id: i64,
+    pub project_name: String,
+    pub service_name: String,
+    pub app_path: String,
+    pub manifest_json: String,
+    pub plan_json: String,
+    pub source_kind: String,
+    pub source_ref: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeRecord {
     pub id: i64,
     pub service_name: Option<String>,

@@ -3,7 +3,7 @@
   "callbackAbi": "signature-typed-v1",
   "compilerIdentityHash": "be4ccaac226915ab0badbc1c928bbce6998a143146c96e9d31674440aecddd6e",
   "contractSchema": "fozzylang.ffi_contracts.v1",
-  "dataLayoutHash": "87f27c55c1ee3975dffddd3f355c3f0c3f11a4810cc15ff26271298d18b256fb",
+  "dataLayoutHash": "7e1036174c284e3d886f2e8d731940a09322138b62708d1c9f173fe212a18d3f",
   "exports": [
     {
       "async": false,
@@ -114,5 +114,5 @@
   "reprCLayouts": [],
   "schemaVersion": "fozzylang.ffi_abi.v1",
   "symbolVersioning": "strict-name-signature-v1",
-  "targetTriple": "aarch64-unknown-linux"
+  "targetTriple": "aarch64-unknown-linux-gnu"
 }

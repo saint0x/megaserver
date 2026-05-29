@@ -120,14 +120,19 @@ pub fn process_alive(pid: i32) -> bool {
     kill(Pid::from_raw(pid), None).is_ok()
 }
 
-pub fn health_check(host: &str, port: Option<u16>, health_path: Option<&str>) -> Result<String> {
+pub fn health_check_with_timeout(
+    host: &str,
+    port: Option<u16>,
+    health_path: Option<&str>,
+    timeout: Duration,
+) -> Result<String> {
     let Some(port) = port else {
         return Ok("no-port-configured".to_string());
     };
     let path = health_path.unwrap_or("/");
     let url = format!("http://{host}:{port}{path}");
     let start = Instant::now();
-    let deadline = start + Duration::from_secs(10);
+    let deadline = start + timeout;
     let agent = ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(2))
         .timeout_connect(Duration::from_secs(2))
@@ -157,6 +162,10 @@ pub fn health_check(host: &str, port: Option<u16>, health_path: Option<&str>) ->
     }
 
     bail!("health check failed for {url}")
+}
+
+pub fn health_check(host: &str, port: Option<u16>, health_path: Option<&str>) -> Result<String> {
+    health_check_with_timeout(host, port, health_path, Duration::from_secs(10))
 }
 
 pub fn tail_log(path: &Path, lines: usize) -> Result<String> {

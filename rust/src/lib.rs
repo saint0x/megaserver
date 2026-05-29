@@ -11,6 +11,7 @@ pub mod manifest;
 pub mod model;
 pub mod network;
 pub mod planner;
+pub mod projects;
 pub mod proxy;
 pub mod runtime;
 pub mod sandbox;

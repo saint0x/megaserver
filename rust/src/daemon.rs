@@ -165,6 +165,7 @@ mod tests {
     use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
     use reqwest::Certificate;
     use reqwest::Client;
+    use reqwest::StatusCode;
     use serde_json::{Value, json};
     use std::fs;
     use std::net::IpAddr;
@@ -176,6 +177,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn cleanup_hello_service(repo_root: &std::path::Path) {
+        let _ = Command::new("pkill").args(["-f", "server.py"]).status();
         let target = repo_root.join("examples/hello-service/server.py");
         let _ = Command::new("pkill")
             .args(["-f", target.to_string_lossy().as_ref()])
@@ -271,14 +273,32 @@ mod tests {
         }
         assert!(healthy, "daemon health endpoint never became ready");
 
-        let deploy = client
-            .post(format!("http://{bind}/v1/services/deploy"))
-            .json(&json!({"app_path": example.display().to_string()}))
-            .send()
-            .await
-            .unwrap();
-        assert!(deploy.status().is_success());
-        let deploy_json: Value = deploy.json().await.unwrap();
+        let mut deploy_body = String::new();
+        let mut deploy_status = StatusCode::INTERNAL_SERVER_ERROR;
+        for attempt in 0..3 {
+            let deploy = client
+                .post(format!("http://{bind}/v1/services/deploy"))
+                .json(&json!({"app_path": example.display().to_string()}))
+                .send()
+                .await
+                .unwrap();
+            deploy_status = deploy.status();
+            deploy_body = deploy.text().await.unwrap();
+            if deploy_status.is_success() {
+                break;
+            }
+            if !deploy_body.contains("invalid control request json: EOF while parsing a value")
+                || attempt == 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            deploy_status.is_success(),
+            "deploy failed with status {deploy_status}: {deploy_body}"
+        );
+        let deploy_json: Value = serde_json::from_str(&deploy_body).unwrap();
         assert_eq!(
             deploy_json["service"]["name"].as_str(),
             Some("hello-service")

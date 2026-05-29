@@ -77,8 +77,13 @@ fn route_plan(
         model.contracts.RouteKind::RouteRoutesList => return handle_routes_list(ctx, req, req.home),
         model.contracts.RouteKind::RouteRoutesCreate => return handle_routes_create(ctx, req.body, req.home),
         model.contracts.RouteKind::RouteRoutesSign => return handle_routes_sign(ctx, req.body, req.home),
+        model.contracts.RouteKind::RouteProjectsList => return handle_projects_list(ctx, req.home),
+        model.contracts.RouteKind::RouteProjectsImport => return handle_projects_import(ctx, req.body, req.home),
+        model.contracts.RouteKind::RouteProjectsUpload => return handle_projects_upload(ctx, req.body, req.home),
         model.contracts.RouteKind::RouteVolumesList => return handle_volumes_list(ctx, req.home),
         model.contracts.RouteKind::RouteVolumesCreate => return handle_volumes_create(ctx, req.body, req.home),
+        model.contracts.RouteKind::RouteDeploymentsList => return handle_deployments_list(ctx, req, req.home),
+        model.contracts.RouteKind::RouteDeploymentsCreate => return handle_deployments_create(ctx, req.body, req.home),
         model.contracts.RouteKind::RouteSecretsList => return handle_secrets_list(ctx, req, req.home),
         model.contracts.RouteKind::RouteSecretsSet => return handle_secrets_set(ctx, req.body, req.home),
         model.contracts.RouteKind::RouteEventsList => return handle_events_list(ctx, req, req.home),
@@ -289,6 +294,42 @@ fn handle_routes_sign(ctx: fzweb.request.RequestContext, body_json: str, home: s
     return fzweb.response.accepted_json(request_action_json("route_sign", fields, home))
 }
 
+fn handle_projects_list(ctx: fzweb.request.RequestContext, home: str) -> fzweb.response.ResponsePlan {
+    discard ctx
+    return fzweb.response.json_plan(200, request_action_json("project_list", list.new(), home))
+}
+
+fn handle_projects_import(ctx: fzweb.request.RequestContext, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
+    if parsed.ok == 0 {
+        return request_error_plan(parsed.err)
+    }
+    let fields = list.new()
+    let source_path = fzweb.request.json_required_str(parsed.payload, "source_path", ctx.route_name)
+    if source_path.ok == 0 {
+        return request_error_plan(source_path.err)
+    }
+    discard list.push(fields, raw_string_field("source_path", source_path.value))
+    discard list.push(fields, raw_nullable_string_field("project", fzweb.request.json_optional_str(parsed.payload, "project")))
+    return fzweb.response.accepted_json(request_action_json("project_import", fields, home))
+}
+
+fn handle_projects_upload(ctx: fzweb.request.RequestContext, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
+    if parsed.ok == 0 {
+        return request_error_plan(parsed.err)
+    }
+    let fields = list.new()
+    let archive_base64 = fzweb.request.json_required_str(parsed.payload, "archive_base64", ctx.route_name)
+    if archive_base64.ok == 0 {
+        return request_error_plan(archive_base64.err)
+    }
+    discard list.push(fields, raw_string_field("archive_base64", archive_base64.value))
+    discard list.push(fields, raw_nullable_string_field("format", fzweb.request.json_optional_str(parsed.payload, "format")))
+    discard list.push(fields, raw_nullable_string_field("project", fzweb.request.json_optional_str(parsed.payload, "project")))
+    return fzweb.response.accepted_json(request_action_json("project_upload", fields, home))
+}
+
 fn handle_volumes_list(ctx: fzweb.request.RequestContext, home: str) -> fzweb.response.ResponsePlan {
     discard ctx
     return fzweb.response.json_plan(200, request_action_json("volume_list", list.new(), home))
@@ -307,6 +348,35 @@ fn handle_volumes_create(ctx: fzweb.request.RequestContext, body_json: str, home
     discard list.push(fields, raw_string_field("name", name.value))
     discard list.push(fields, raw_nullable_string_field("service", fzweb.request.json_optional_str(parsed.payload, "service")))
     return fzweb.response.accepted_json(request_action_json("volume_create", fields, home))
+}
+
+fn handle_deployments_list(ctx: fzweb.request.RequestContext, req: fzweb.request.RequestEnvelope, home: str) -> fzweb.response.ResponsePlan {
+    discard ctx
+    let fields = list.new()
+    let project = fzweb.request.query(req, "project")
+    if str.trim(project) != "" {
+        discard list.push(fields, raw_string_field("project", project))
+    }
+    let service = fzweb.request.query(req, "service")
+    if str.trim(service) != "" {
+        discard list.push(fields, raw_string_field("service", service))
+    }
+    return fzweb.response.json_plan(200, request_action_json("deployment_list", fields, home))
+}
+
+fn handle_deployments_create(ctx: fzweb.request.RequestContext, body_json: str, home: str) -> fzweb.response.ResponsePlan {
+    let parsed = fzweb.request.parse_json_required(body_json, ctx.route_name)
+    if parsed.ok == 0 {
+        return request_error_plan(parsed.err)
+    }
+    let fields = list.new()
+    let project = fzweb.request.json_required_str(parsed.payload, "project", ctx.route_name)
+    if project.ok == 0 {
+        return request_error_plan(project.err)
+    }
+    discard list.push(fields, raw_string_field("project", project.value))
+    discard list.push(fields, raw_json_field("start", fzweb.request.json_optional_raw(parsed.payload, "start")))
+    return fzweb.response.accepted_json(request_action_json("deployment_create", fields, home))
 }
 
 fn handle_secrets_list(ctx: fzweb.request.RequestContext, req: fzweb.request.RequestEnvelope, home: str) -> fzweb.response.ResponsePlan {

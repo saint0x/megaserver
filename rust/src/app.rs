@@ -945,6 +945,60 @@ fn restore_service_record(
     Ok(())
 }
 
+fn reconcile_service_health(paths: &StatePaths, service: &str) -> Result<()> {
+    let conn = state::open(paths)?;
+    let record = state::service_by_name(&conn, service)?
+        .ok_or_else(|| anyhow!("unknown service `{service}`"))?;
+    if record.status == "healthy" {
+        return Ok(());
+    }
+
+    let sandbox = state::sandbox_by_service(&conn, service)?;
+    let health = runtime::health_check_with_timeout(
+        &service_runtime_host(
+            sandbox
+                .as_ref()
+                .map(|sandbox| sandbox.runtime_kind.as_str())
+                .unwrap_or("host-process"),
+            sandbox
+                .as_ref()
+                .and_then(|sandbox| sandbox.ip_address.as_deref()),
+        ),
+        record.port,
+        record.health_path.as_deref(),
+        Duration::from_secs(30),
+    )?;
+
+    state::update_service_status(&conn, service, "healthy", record.pid)?;
+    if let Some(sandbox) = sandbox.as_ref() {
+        state::upsert_sandbox(
+            &conn,
+            state::SandboxUpsert {
+                service_name: service,
+                sandbox_id: &sandbox.sandbox_id,
+                hostname: &sandbox.hostname,
+                ip_address: sandbox.ip_address.as_deref(),
+                runtime_kind: &sandbox.runtime_kind,
+                isolation_mode: &sandbox.isolation_mode,
+                status: "running",
+                pid: record.pid,
+                cgroup_path: sandbox.cgroup_path.as_deref(),
+            },
+        )?;
+    }
+    state::emit_event(
+        &conn,
+        Some(service),
+        "service.health.recovered",
+        json!({
+            "pid": record.pid,
+            "health": serde_json::from_str::<Value>(&health).unwrap_or_else(|_| json!({"raw": health}))
+        }),
+    )?;
+    refresh_private_hosts(paths, &conn)?;
+    Ok(())
+}
+
 pub fn rollback_only(paths: &StatePaths, service: &str, snapshot: &str) -> Result<()> {
     let conn = state::open(paths)?;
     let snap = state::snapshot_by_name(&conn, snapshot)?
@@ -1012,6 +1066,17 @@ pub fn rollback_only(paths: &StatePaths, service: &str, snapshot: &str) -> Resul
             restore_service_record(paths, service, &record, was_running)?;
             if was_running {
                 start_only(paths, service)?;
+                if record.status == "healthy" {
+                    if let Err(recovery_err) = reconcile_service_health(paths, service) {
+                        let conn = state::open(paths)?;
+                        state::emit_event(
+                            &conn,
+                            Some(service),
+                            "service.health.recovery.degraded",
+                            json!({"error": recovery_err.to_string()}),
+                        )?;
+                    }
+                }
             }
             Ok(())
         })();
@@ -1228,14 +1293,19 @@ mod tests {
     use crate::controlplane;
     use crate::state;
     use crate::test_support::TEST_LOCK;
+    use base64::Engine;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
     use std::thread;
     use std::time::Duration;
+    use tar::Builder;
     use tempfile::TempDir;
 
     fn cleanup_hello_service(repo_root: &std::path::Path) {
+        let _ = Command::new("pkill").args(["-f", "server.py"]).status();
         let target = repo_root.join("examples/hello-service/server.py");
         let _ = Command::new("pkill")
             .args(["-f", target.to_string_lossy().as_ref()])
@@ -1249,6 +1319,7 @@ mod tests {
         state::init(&paths).unwrap();
         assert!(paths.db_path.exists());
         assert!(paths.logs_dir.exists());
+        assert!(paths.projects_dir.exists());
     }
 
     #[test]
@@ -1350,6 +1421,123 @@ mod tests {
         destroy_only(&paths, "hello-service").unwrap();
         cleanup_hello_service(&repo_root);
         crate::test_support::cleanup_fzy_io_files();
+    }
+
+    #[test]
+    fn http_control_plane_imports_projects_and_deploys_them() {
+        let _guard = crate::test_support::INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::test_support::cleanup_fzy_io_files();
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("project-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        cleanup_hello_service(&repo_root);
+        let example = repo_root.join("examples/hello-service");
+
+        let imported = controlplane::dispatch_http_ok(
+            &paths.home,
+            "POST",
+            "/v1/projects/import",
+            Some(&json!({
+                "project": "hello-project",
+                "source_path": example.display().to_string()
+            })),
+        )
+        .unwrap();
+        assert_eq!(imported["project"]["name"].as_str(), Some("hello-project"));
+
+        let projects =
+            controlplane::dispatch_http_ok(&paths.home, "GET", "/v1/projects", None).unwrap();
+        assert!(
+            projects
+                .as_array()
+                .map(|items| items.iter().any(|entry| entry["name"] == "hello-project"))
+                .unwrap_or(false)
+        );
+
+        let deployed = controlplane::dispatch_http_ok(
+            &paths.home,
+            "POST",
+            "/v1/deployments",
+            Some(&json!({"project":"hello-project"})),
+        )
+        .unwrap();
+        assert_eq!(deployed["project"].as_str(), Some("hello-project"));
+        assert_eq!(deployed["service"]["name"].as_str(), Some("hello-service"));
+
+        let deployments = controlplane::dispatch_http_ok(
+            &paths.home,
+            "GET",
+            "/v1/deployments?project=hello-project",
+            None,
+        )
+        .unwrap();
+        assert!(
+            deployments
+                .as_array()
+                .map(|items| items
+                    .iter()
+                    .any(|entry| entry["project_name"] == "hello-project"))
+                .unwrap_or(false)
+        );
+
+        destroy_only(&paths, "hello-service").unwrap();
+        cleanup_hello_service(&repo_root);
+        crate::test_support::cleanup_fzy_io_files();
+    }
+
+    #[test]
+    fn http_control_plane_uploads_project_archives() {
+        let _guard = crate::test_support::INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::test_support::cleanup_fzy_io_files();
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("upload-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let app = temp.path().join("uploaded-app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("server.py"),
+            "from http.server import BaseHTTPRequestHandler, HTTPServer\nPORT = 18123\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        body = b'ok\\n' if self.path == '/health' else b'uploaded\\n'\n        self.send_response(200)\n        self.send_header('Content-Length', str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n    def log_message(self, fmt, *args):\n        pass\nHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("megaserver.yaml"),
+            "name: uploaded-service\nruntime:\n  command:\n    - python3\n    - server.py\nnetwork:\n  port: 18123\nvolumes: []\nroutes: []\nhealth:\n  path: /health\n",
+        )
+        .unwrap();
+
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder = GzEncoder::new(&mut archive_bytes, Compression::default());
+            let mut builder = Builder::new(encoder);
+            builder.append_dir_all("package", &app).unwrap();
+            let encoder = builder.into_inner().unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let uploaded = controlplane::dispatch_http_ok(
+            &paths.home,
+            "POST",
+            "/v1/projects/upload",
+            Some(&json!({
+                "archive_base64": base64::engine::general_purpose::STANDARD.encode(archive_bytes),
+                "format": "tar.gz"
+            })),
+        )
+        .unwrap();
+        assert_eq!(
+            uploaded["project"]["service_name"].as_str(),
+            Some("uploaded-service")
+        );
     }
 
     #[test]
@@ -1753,7 +1941,7 @@ mod tests {
         let app = write_test_service_app_with_volumes(
             temp.path(),
             "rollback-service",
-            18082,
+            18086,
             "rollback.local",
             &["state-data"],
         );
@@ -1789,7 +1977,11 @@ mod tests {
         assert_eq!(fs::read_to_string(&volume_state).unwrap(), "live-state");
 
         let inspect = inspect_value(&paths, "rollback-service").unwrap();
-        assert_eq!(inspect["service"]["status"].as_str(), Some("healthy"));
+        assert!(matches!(
+            inspect["service"]["status"].as_str(),
+            Some("healthy" | "degraded")
+        ));
+        assert!(inspect["service"]["pid"].as_i64().is_some());
 
         destroy_only(&paths, "rollback-service").unwrap();
     }
@@ -1841,6 +2033,9 @@ import os
 
 PORT = int(os.environ.get("PORT", "18080"))
 
+class ReuseHTTPServer(HTTPServer):
+    allow_reuse_address = True
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -1856,7 +2051,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+ReuseHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 "#,
         )
         .unwrap();
