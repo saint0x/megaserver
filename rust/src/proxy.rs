@@ -37,6 +37,7 @@ struct ProxyPlan {
     forwarded_host: String,
     forwarded_proto: String,
     forwarded_port: String,
+    drop_request_headers: String,
     websocket_protocol: Option<String>,
 }
 
@@ -119,13 +120,7 @@ async fn proxy_request(
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut upstream = state.client.request(method, target).body(body_bytes);
-    upstream = copy_headers(
-        &parts.headers,
-        upstream,
-        &plan.forwarded_host,
-        &plan.forwarded_proto,
-        &plan.forwarded_port,
-    );
+    upstream = copy_headers(&parts.headers, upstream, &plan);
     let response = upstream.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let status = response.status();
@@ -261,30 +256,24 @@ async fn tunnel_websockets(
 fn copy_headers(
     headers: &HeaderMap,
     mut request: reqwest::RequestBuilder,
-    host: &str,
-    ingress_scheme: &str,
-    ingress_port: &str,
+    plan: &ProxyPlan,
 ) -> reqwest::RequestBuilder {
     for (name, value) in headers {
-        let lower = name.as_str();
-        if lower.eq_ignore_ascii_case("host")
-            || lower.eq_ignore_ascii_case("connection")
-            || lower.eq_ignore_ascii_case("keep-alive")
-            || lower.eq_ignore_ascii_case("proxy-authenticate")
-            || lower.eq_ignore_ascii_case("proxy-authorization")
-            || lower.eq_ignore_ascii_case("te")
-            || lower.eq_ignore_ascii_case("trailer")
-            || lower.eq_ignore_ascii_case("transfer-encoding")
-            || lower.eq_ignore_ascii_case("upgrade")
-        {
+        if header_is_dropped(name.as_str(), &plan.drop_request_headers) {
             continue;
         }
         request = request.header(name, value);
     }
-    request = request.header("x-forwarded-host", host);
-    request = request.header("x-forwarded-proto", ingress_scheme);
-    request = request.header("x-forwarded-port", ingress_port);
+    request = request.header("x-forwarded-host", &plan.forwarded_host);
+    request = request.header("x-forwarded-proto", &plan.forwarded_proto);
+    request = request.header("x-forwarded-port", &plan.forwarded_port);
     request
+}
+
+fn header_is_dropped(name: &str, drop_headers: &str) -> bool {
+    drop_headers
+        .split(',')
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
 fn ingress_plan(
@@ -353,6 +342,11 @@ fn proxy_plan_from_value(value: Value) -> Result<ProxyPlan, StatusCode> {
             .get("forwarded_port")
             .and_then(Value::as_str)
             .unwrap_or("80")
+            .to_string(),
+        drop_request_headers: value
+            .get("drop_request_headers")
+            .and_then(Value::as_str)
+            .unwrap_or("")
             .to_string(),
         websocket_protocol: value
             .get("sec_websocket_protocol")

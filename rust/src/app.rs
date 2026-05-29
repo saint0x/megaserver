@@ -1223,6 +1223,50 @@ mod tests {
         crate::test_support::cleanup_fzy_io_files();
     }
 
+    #[test]
+    fn ingress_control_plane_emits_header_policy() {
+        let _guard = crate::test_support::INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::test_support::cleanup_fzy_io_files();
+        let temp = TempDir::new().unwrap();
+        let paths =
+            StatePaths::resolve(Some(temp.path().join("ingress-header-policy-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        cleanup_hello_service(&repo_root);
+        let example = repo_root.join("examples/hello-service");
+
+        deploy_and_start_only(&paths, &example).unwrap();
+
+        let plan = controlplane::dispatch_ingress_raw(
+            &paths.home,
+            "hello.local:8443",
+            "/health",
+            None,
+            "https",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let drop_headers = plan["drop_request_headers"].as_str().unwrap_or("");
+        assert!(drop_headers.contains("host"));
+        assert!(drop_headers.contains("connection"));
+        assert!(drop_headers.contains("x-forwarded-host"));
+        assert!(drop_headers.contains("x-forwarded-proto"));
+        assert!(drop_headers.contains("x-forwarded-port"));
+
+        destroy_only(&paths, "hello-service").unwrap();
+        cleanup_hello_service(&repo_root);
+        crate::test_support::cleanup_fzy_io_files();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_private_network_supports_service_to_service_reachability() {
