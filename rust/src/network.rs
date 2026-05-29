@@ -205,6 +205,30 @@ pub mod linux {
                     FIREWALL_CHAIN,
                     "-i",
                     BRIDGE_NAME,
+                    "!",
+                    "-s",
+                    SANDBOX_SUBNET,
+                    "-j",
+                    "DROP",
+                ],
+                &[
+                    "-A",
+                    FIREWALL_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "!",
+                    "-s",
+                    SANDBOX_SUBNET,
+                    "-j",
+                    "DROP",
+                ],
+            )?;
+            self.ensure_iptables_rule(
+                &[
+                    "-C",
+                    FIREWALL_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
                     "-o",
                     BRIDGE_NAME,
                     "-j",
@@ -258,6 +282,30 @@ pub mod linux {
             self.ensure_iptables_rule(
                 &["-C", "INPUT", "-j", INPUT_CHAIN],
                 &["-A", "INPUT", "-j", INPUT_CHAIN],
+            )?;
+            self.ensure_iptables_rule(
+                &[
+                    "-C",
+                    INPUT_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "!",
+                    "-s",
+                    SANDBOX_SUBNET,
+                    "-j",
+                    "DROP",
+                ],
+                &[
+                    "-A",
+                    INPUT_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "!",
+                    "-s",
+                    SANDBOX_SUBNET,
+                    "-j",
+                    "DROP",
+                ],
             )?;
             self.ensure_iptables_rule(
                 &[
@@ -495,6 +543,10 @@ pub mod linux {
                     Err("missing forward jump"),
                 )
                 .with_output(
+                    "iptables -C MEGASERVER-FORWARD -i megabr0 ! -s 10.42.0.0/24 -j DROP",
+                    Err("missing anti-spoof forward rule"),
+                )
+                .with_output(
                     "iptables -C MEGASERVER-FORWARD -i megabr0 -o megabr0 -j ACCEPT",
                     Err("missing east-west rule"),
                 )
@@ -513,6 +565,10 @@ pub mod linux {
                 .with_output(
                     "iptables -C INPUT -j MEGASERVER-INPUT",
                     Err("missing input jump"),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-INPUT -i megabr0 ! -s 10.42.0.0/24 -j DROP",
+                    Err("missing anti-spoof input rule"),
                 )
                 .with_output(
                     "iptables -C MEGASERVER-INPUT -i megabr0 -p udp --dport 53 -j ACCEPT",
@@ -538,6 +594,9 @@ pub mod linux {
             assert!(calls.contains(&"ip link add megabr0 type bridge".to_string()));
             assert!(calls.contains(&"ip addr replace 10.42.0.254/24 dev megabr0".to_string()));
             assert!(calls.contains(
+                &"iptables -A MEGASERVER-FORWARD -i megabr0 ! -s 10.42.0.0/24 -j DROP".to_string()
+            ));
+            assert!(calls.contains(
                 &"iptables -A MEGASERVER-FORWARD -i megabr0 -o megabr0 -j ACCEPT".to_string()
             ));
             assert!(
@@ -551,6 +610,9 @@ pub mod linux {
                     &"iptables -A MEGASERVER-FORWARD -d 10.42.0.0/24 -j DROP".to_string()
                 )
             );
+            assert!(calls.contains(
+                &"iptables -A MEGASERVER-INPUT -i megabr0 ! -s 10.42.0.0/24 -j DROP".to_string()
+            ));
             assert!(calls.contains(
                 &"iptables -A MEGASERVER-INPUT -i megabr0 -p udp --dport 53 -j ACCEPT".to_string()
             ));
@@ -582,6 +644,10 @@ pub mod linux {
                     Ok(""),
                 )
                 .with_output(
+                    "iptables -C MEGASERVER-FORWARD -i megabr0 ! -s 10.42.0.0/24 -j DROP",
+                    Ok(""),
+                )
+                .with_output(
                     "iptables -C MEGASERVER-FORWARD -i megabr0 -o megabr0 -j ACCEPT",
                     Ok(""),
                 )
@@ -599,6 +665,10 @@ pub mod linux {
                 )
                 .with_output(
                     "iptables -C INPUT -j MEGASERVER-INPUT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-INPUT -i megabr0 ! -s 10.42.0.0/24 -j DROP",
                     Ok(""),
                 )
                 .with_output(
