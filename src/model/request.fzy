@@ -25,12 +25,12 @@ struct JsonResult {
     err: RequestError,
 }
 
-fn context(kind: model.contracts.RouteKind, route_path: str) -> RequestContext {
+fn context(kind: RouteKind, route_path: str) -> RequestContext {
     return RequestContext {
-        route_id: model.contracts.route_id(kind),
-        route_name: model.contracts.route_name(kind),
+        route_id: contracts.route_id(kind),
+        route_name: contracts.route_name(kind),
         route_path: route_path,
-        route_prefix: model.contracts.route_prefix(kind),
+        route_prefix: contracts.route_prefix(kind),
     }
 }
 
@@ -108,3 +108,4 @@ fn json_optional_str(payload: JsonHandle, key: str) -> str {
 fn json_optional_raw(payload: JsonHandle, key: str) -> str {
     return json.get_str(json.get(payload, key), "raw")
 }
+use contracts;

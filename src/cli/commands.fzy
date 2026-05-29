@@ -1,0 +1,26 @@
+use core.term;
+
+fn print_help() -> i32 {
+    discard term.print_line("megaserver commands:")
+    discard term.print_line("  schema-version")
+    discard term.print_line("  planner-manifest")
+    discard term.print_line("  dispatch-control")
+    discard term.print_line("  route-count")
+    return 0
+}
+
+fn dispatch(command: str) -> i32 {
+    if command == "schema-version" {
+        return megaserver_fzy_schema_version()
+    }
+    if command == "planner-manifest" {
+        return megaserver_fzy_plan_manifest()
+    }
+    if command == "dispatch-control" {
+        return megaserver_fzy_dispatch_control()
+    }
+    if command == "route-count" {
+        return runtime.route_count()
+    }
+    return print_help()
+}

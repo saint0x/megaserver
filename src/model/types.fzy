@@ -61,7 +61,7 @@ fn control_error_json(action: str, message: str) -> str {
     return json.object(payload)
 }
 
-fn request_error_json(err: model.request.RequestError) -> str {
+fn request_error_json(err: RequestError) -> str {
     let payload = map.new()
     discard map.set(payload, "status", json.str("error"))
     discard map.set(payload, "http_status", json.raw(str.from_i32(err.status)))

@@ -1,4 +1,38 @@
 fn boot() -> i32 {
     discard model.preflight()
+    discard api.touch()
     return services.boot()
+}
+
+fn openapi_path() -> str {
+    return "/tmp/megaserver/openapi.json"
+}
+
+fn route_count() -> i32 {
+    return 20
+}
+
+fn routes_json() -> str {
+    let routes = list.new()
+    let mut route_id = 1
+    while route_id <= route_count() {
+        discard list.push(
+            routes,
+            json.raw(
+                model.types.route_json(
+                    route_id,
+                    model.contracts.route_name(model.contracts.route_by_id(route_id)),
+                    "ANY",
+                    model.contracts.route_prefix(model.contracts.route_by_id(route_id)),
+                    model.contracts.route_prefix(model.contracts.route_by_id(route_id)),
+                    model.contracts.route_public(model.contracts.route_by_id(route_id)),
+                    model.contracts.route_skip_rate(model.contracts.route_by_id(route_id)),
+                    model.contracts.route_require_json(model.contracts.route_by_id(route_id)),
+                    if model.contracts.route_public(model.contracts.route_by_id(route_id)) == 1 { "public" } else { "operator" },
+                ),
+            ),
+        )
+        route_id += 1
+    }
+    return json.array(routes)
 }

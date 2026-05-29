@@ -42,7 +42,7 @@ fn api_error(status: i32, code: str, message: str, details: str) -> ApiError {
     }
 }
 
-fn request_error(err: model.request.RequestError) -> ApiError {
+fn request_error(err: RequestError) -> ApiError {
     return api_error(err.status, err.code, err.message, err.details)
 }
 

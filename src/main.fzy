@@ -1,27 +1,11 @@
-use core.fs;
-use core.time;
+use core.process;
 
 mod api;
-mod fzweb;
 mod model;
-mod runtime;
 mod services;
-
-fn ffi_manifest_path() -> str {
-    return "/tmp/megaserver/api.ffi.json"
-}
-
-fn ffi_touch() -> i32 {
-    let exports = list.new()
-    discard list.push(exports, json.raw(model.types.ffi_export_json("megaserver_fzy_schema_version", "schema", "native")))
-    discard list.push(exports, json.raw(model.types.ffi_export_json("megaserver_fzy_plan_manifest", "planner", "native")))
-    discard list.push(exports, json.raw(model.types.ffi_export_json("megaserver_fzy_dispatch_control", "control_plane", "native")))
-    discard fs.write_file(
-        ffi_manifest_path(),
-        model.types.ffi_manifest_json("c-compatible-descriptor", "megaserver", json.array(exports), "/tmp/megaserver/api.rpc.json", services.web.openapi_path()),
-    )
-    return 0
-}
+mod runtime;
+mod cli;
+mod tests;
 
 #[ffi_panic(error)]
 pubext c fn megaserver_fzy_schema_version() -> i32 {
@@ -41,8 +25,8 @@ pubext c fn megaserver_fzy_dispatch_control() -> i32 {
 fn main() -> i32 {
     requires true
     discard runtime.boot()
-    discard api.touch()
-    discard ffi_touch()
+    discard cli.boot()
+    let command = process.argv_or(1, "schema-version")
     ensures true
-    return megaserver_fzy_schema_version()
+    return cli.run(command)
 }

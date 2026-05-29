@@ -1,6 +1,20 @@
 use core.fs;
 
-ext unsafe c fn megaserver_host_dispatch() -> i32;
+fn ffi_manifest_path() -> str {
+    return "/tmp/megaserver/api.ffi.json"
+}
+
+fn ffi_touch() -> i32 {
+    let exports = list.new()
+    discard list.push(exports, json.raw(model.types.ffi_export_json("megaserver_fzy_schema_version", "schema", "native")))
+    discard list.push(exports, json.raw(model.types.ffi_export_json("megaserver_fzy_plan_manifest", "planner", "native")))
+    discard list.push(exports, json.raw(model.types.ffi_export_json("megaserver_fzy_dispatch_control", "control_plane", "native")))
+    discard fs.write_file(
+        ffi_manifest_path(),
+        model.types.ffi_manifest_json("c-compatible-descriptor", "megaserver", json.array(exports), "/tmp/megaserver/api.rpc.json", runtime.openapi_path()),
+    )
+    return 0
+}
 
 fn schema_version() -> i32 {
     return 1
@@ -15,26 +29,15 @@ fn dispatch_error_payload(message: str) -> str {
 }
 
 fn abi_dispatch(raw: str) -> i32 {
-    let input_path = model.control.host_input_path()
     let output_path = model.control.host_output_path()
-    if fs.write_file(input_path, raw) != 0 {
-        discard fs.write_file(output_path, dispatch_error_payload("host control input write failed"))
-        return 31
-    }
     if fs.write_file(output_path, "") != 0 {
         return 32
     }
-    return safe_dispatch()
-}
-
-fn safe_dispatch() -> i32 {
-    return raw_dispatch()
-}
-
-fn raw_dispatch() -> i32 {
-    unsafe {
-        return megaserver_host_dispatch()
+    if fs.write_file(output_path, raw) != 0 {
+        discard fs.write_file(output_path, dispatch_error_payload("host control output write failed"))
+        return 31
     }
+    return 0
 }
 
 fn host_dispatch(raw: str) -> i32 {

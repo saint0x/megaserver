@@ -1,0 +1,16 @@
+mod commands;
+
+fn boot() -> i32 {
+    return 0
+}
+
+fn print_help() -> i32 {
+    return commands.print_help()
+}
+
+fn run(command: str) -> i32 {
+    if command == "help" || command == "--help" {
+        return print_help()
+    }
+    return commands.dispatch(command)
+}

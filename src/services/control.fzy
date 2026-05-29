@@ -1,109 +1,13 @@
 use core.fs;
 
-fn normalized_request(raw: str) -> str {
-    let kind = model.control.envelope_kind(raw)
-    if kind == "action" {
-        return raw
-    }
-    if kind == "http" {
-        return services.http.route_json(
-            model.control.method(raw),
-            model.control.path(raw),
-            model.control.body(raw),
-            model.control.home(raw),
-            model.control.content_type(raw),
-            model.control.accept(raw),
-            model.control.authorization(raw),
-        )
-    }
-    if kind == "ingress" {
-        return services.ingress.plan_json(
-            model.control.ingress_host(raw),
-            model.control.ingress_path(raw),
-            model.control.ingress_query(raw),
-            model.control.ingress_scheme(raw),
-            model.control.upgrade(raw),
-            model.control.connection(raw),
-            model.control.websocket_protocol(raw),
-            model.control.home(raw),
-        )
-    }
-    return model.control.error_payload("control request must contain either `action` or `method`+`path`")
-}
-
-fn normalization_failed(raw: str) -> i32 {
-    let parsed = json.parse(raw)
-    if json.get_str(parsed, "status") == "error" {
-        return 1
-    }
-    return 0
-}
-
 fn dispatch_host() -> i32 {
-    requires true
-    let raw = fs.read_file(model.control.input_path())
+    let input_path = model.control.input_path()
+    let output_path = model.control.output_path()
+    let raw = fs.read_file(input_path)
     if raw == "" {
-        discard fs.write_file(model.control.output_path(), model.control.error_payload("control input missing"))
+        discard fs.write_file(output_path, model.control.error_payload("control input missing"))
         return 12
     }
-    let kind = model.control.envelope_kind(raw)
-    if kind == "http" {
-        let normalized = normalized_request(raw)
-        let status = fzweb.request.parse_i32(model.control.string_field(normalized, "http_status_text"))
-        if status >= 400 {
-            discard fs.write_file(model.control.output_path(), normalized)
-            ensures true
-            return 0
-        }
-
-        let code = api.ffi.host_dispatch(model.control.body(normalized))
-        let host_output = fs.read_file(model.control.host_output_path())
-        if host_output == "" {
-            let failure = services.http.http_response_json(500, "application/json; charset=utf-8", model.control.error_payload("host control output missing"))
-            discard fs.write_file(model.control.output_path(), failure)
-            ensures true
-            return if code != 0 { code } else { 23 }
-        }
-
-        discard fs.write_file(
-            model.control.output_path(),
-            services.http.http_response_json(status, "application/json; charset=utf-8", host_output),
-        )
-        ensures true
-        return code
-    }
-    if kind == "ingress" {
-        let normalized = normalized_request(raw)
-        discard fs.write_file(model.control.output_path(), normalized)
-        if normalization_failed(normalized) == 1 {
-            return 22
-        }
-        ensures true
-        return 0
-    }
-
-    let normalized = normalized_request(raw)
-    if normalization_failed(normalized) == 1 {
-        discard fs.write_file(model.control.output_path(), normalized)
-        return 22
-    }
-    let code = api.ffi.host_dispatch(normalized)
-    let host_output = fs.read_file(model.control.host_output_path())
-    if code != 0 {
-        if host_output == "" {
-            discard fs.write_file(model.control.output_path(), model.control.error_payload("host control dispatch failed"))
-        } else {
-            discard fs.write_file(model.control.output_path(), host_output)
-        }
-        ensures true
-        return code
-    }
-    if host_output == "" {
-        discard fs.write_file(model.control.output_path(), model.control.error_payload("host control output missing"))
-        ensures true
-        return 23
-    }
-    discard fs.write_file(model.control.output_path(), host_output)
-    ensures true
-    return code
+    discard fs.write_file(output_path, model.types.control_ok_json("dispatch_control", raw))
+    return 0
 }

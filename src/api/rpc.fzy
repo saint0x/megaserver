@@ -5,6 +5,6 @@ fn rpc_manifest_path() -> str {
 }
 
 fn rpc_touch() -> i32 {
-    discard fs.write_file(rpc_manifest_path(), model.types.rpc_manifest_json(services.web.routes_json(), services.web.openapi_path()))
+    discard fs.write_file(rpc_manifest_path(), model.types.rpc_manifest_json(runtime.routes_json(), runtime.openapi_path()))
     return 0
 }

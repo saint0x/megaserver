@@ -3,5 +3,6 @@ mod ffi;
 
 fn touch() -> i32 {
     discard rpc.rpc_touch()
+    discard ffi.ffi_touch()
     return 0
 }

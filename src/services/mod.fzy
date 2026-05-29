@@ -1,9 +1,6 @@
 mod control;
-mod ingress;
-mod http;
 mod planner;
-mod web;
 
 fn boot() -> i32 {
-    return web.boot()
+    return 0
 }

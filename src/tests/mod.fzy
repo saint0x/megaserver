@@ -1,0 +1,6 @@
+test "det_runtime_boot" {
+    let status = runtime.boot()
+    if status == 0 && runtime.route_count() > 0 {
+        checkpoint()
+    }
+}
