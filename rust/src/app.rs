@@ -165,6 +165,76 @@ fn sandbox_hostname(service: &str) -> String {
     format!("{service}.sandbox.megaserver")
 }
 
+fn sandbox_runtime_dir(paths: &StatePaths, service: &str) -> PathBuf {
+    paths.service_runtime_dir(service).join("sandbox")
+}
+
+fn write_private_hosts_file(
+    paths: &StatePaths,
+    conn: &rusqlite::Connection,
+    service: &str,
+    hostname: &str,
+    ip_address: &str,
+) -> Result<()> {
+    let runtime_dir = sandbox_runtime_dir(paths, service);
+    fs::create_dir_all(&runtime_dir)?;
+
+    let mut lines = vec![
+        "127.0.0.1 localhost".to_string(),
+        format!("{} gateway.megaserver", crate::network::sandbox_gateway()),
+    ];
+    let mut seen = std::collections::HashSet::new();
+
+    for sandbox in state::list_sandboxes(conn)? {
+        if sandbox.status == "stopped" {
+            continue;
+        }
+        let Some(sandbox_ip) = sandbox.ip_address else {
+            continue;
+        };
+        if seen.insert(sandbox.service_name.clone()) {
+            lines.push(format!(
+                "{sandbox_ip} {} {}",
+                sandbox.hostname, sandbox.service_name
+            ));
+        }
+    }
+
+    if seen.insert(service.to_string()) {
+        lines.push(format!("{ip_address} {hostname} {service}"));
+    }
+
+    fs::write(runtime_dir.join("hosts"), lines.join("\n") + "\n")?;
+    Ok(())
+}
+
+fn refresh_private_hosts(paths: &StatePaths, conn: &rusqlite::Connection) -> Result<()> {
+    for sandbox in state::list_sandboxes(conn)? {
+        if sandbox.status == "stopped" {
+            continue;
+        }
+        let Some(ip_address) = sandbox.ip_address.as_deref() else {
+            continue;
+        };
+        write_private_hosts_file(
+            paths,
+            conn,
+            &sandbox.service_name,
+            &sandbox.hostname,
+            ip_address,
+        )?;
+    }
+    Ok(())
+}
+
+fn service_runtime_host(runtime_kind: &str, sandbox_ip: Option<&str>) -> String {
+    if runtime_kind == "linux-namespace" {
+        sandbox_ip.unwrap_or("127.0.0.1").to_string()
+    } else {
+        "127.0.0.1".to_string()
+    }
+}
+
 fn sandbox_id(service: &str, pid: i32) -> String {
     format!("{service}-{pid}")
 }
@@ -228,6 +298,15 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
         .find(|(key, _)| key == "MEGASERVER_SANDBOX_IP")
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
+    if let Some(existing) = state::sandbox_by_service(&conn, service)? {
+        crate::sandbox::cleanup_sandbox(&crate::sandbox::SandboxLaunchMetadata {
+            service_name: Some(service.to_string()),
+            runtime_kind: existing.runtime_kind,
+            isolation_mode: existing.isolation_mode,
+            cgroup_path: existing.cgroup_path,
+        })?;
+    }
+    write_private_hosts_file(paths, &conn, service, &sandbox_hostname, &sandbox_ip_text)?;
     let spawned = runtime::spawn_service(
         paths,
         service,
@@ -268,6 +347,7 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
     )?;
 
     let health_status = match runtime::health_check(
+        &service_runtime_host(&spawned.runtime_kind, Some(&sandbox_ip_text)),
         manifest.network.port,
         manifest.health.path.as_deref(),
     ) {
@@ -294,6 +374,7 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
                 "service.health.degraded",
                 json!({"pid": spawned.pid, "error": err.to_string(), "sandbox_id": sandbox_id, "ip_address": sandbox_ip_text.clone(), "runtime_kind": spawned.runtime_kind, "isolation_mode": spawned.isolation_mode, "cgroup_path": spawned.cgroup_path}),
             )?;
+            refresh_private_hosts(paths, &conn)?;
             println!(
                 "{}",
                 json!({"status": "degraded", "service": service, "pid": spawned.pid, "error": err.to_string()})
@@ -331,6 +412,7 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
             "health": serde_json::from_str::<Value>(&health_status).unwrap_or_else(|_| json!({"raw": health_status}))
         }),
     )?;
+    refresh_private_hosts(paths, &conn)?;
     Ok(())
 }
 
@@ -352,6 +434,12 @@ pub fn stop_only(paths: &StatePaths, service: &str) -> Result<()> {
     let conn = state::open(paths)?;
     state::update_service_status(&conn, service, "stopped", None)?;
     if let Some(existing) = state::sandbox_by_service(&conn, service)? {
+        crate::sandbox::cleanup_sandbox(&crate::sandbox::SandboxLaunchMetadata {
+            service_name: Some(service.to_string()),
+            runtime_kind: existing.runtime_kind.clone(),
+            isolation_mode: existing.isolation_mode.clone(),
+            cgroup_path: existing.cgroup_path.clone(),
+        })?;
         state::upsert_sandbox(
             &conn,
             state::SandboxUpsert {
@@ -363,10 +451,11 @@ pub fn stop_only(paths: &StatePaths, service: &str) -> Result<()> {
                 isolation_mode: &existing.isolation_mode,
                 status: "stopped",
                 pid: None,
-                cgroup_path: existing.cgroup_path.as_deref(),
+                cgroup_path: None,
             },
         )?;
     }
+    refresh_private_hosts(paths, &conn)?;
     state::emit_event(
         &conn,
         Some(service),
@@ -394,6 +483,7 @@ pub fn destroy_only(paths: &StatePaths, service: &str) -> Result<()> {
     let conn = state::open(paths)?;
     if let Some(sandbox) = state::sandbox_by_service(&conn, service)? {
         crate::sandbox::cleanup_sandbox(&crate::sandbox::SandboxLaunchMetadata {
+            service_name: Some(service.to_string()),
             runtime_kind: sandbox.runtime_kind,
             isolation_mode: sandbox.isolation_mode,
             cgroup_path: sandbox.cgroup_path,
@@ -407,6 +497,7 @@ pub fn destroy_only(paths: &StatePaths, service: &str) -> Result<()> {
     )?;
     state::delete_sandbox(&conn, service)?;
     state::delete_service(&conn, service)?;
+    refresh_private_hosts(paths, &conn)?;
     let runtime_dir = paths.service_runtime_dir(service);
     let logs_dir = paths.service_logs_dir(service);
     let _ = fs::remove_dir_all(runtime_dir);
@@ -722,10 +813,20 @@ pub fn inspect_value(paths: &StatePaths, service: &str) -> Result<serde_json::Va
         .filter(|volume| volume.service_name.as_deref() == Some(service))
         .collect::<Vec<_>>();
     let health = if service_record.status == "healthy" || service_record.status == "degraded" {
-        runtime::health_check(service_record.port, service_record.health_path.as_deref())
-            .unwrap_or_else(|err| {
-                json!({"status": "error", "message": err.to_string()}).to_string()
-            })
+        runtime::health_check(
+            &service_runtime_host(
+                sandbox
+                    .as_ref()
+                    .map(|sandbox| sandbox.runtime_kind.as_str())
+                    .unwrap_or("host-process"),
+                sandbox
+                    .as_ref()
+                    .and_then(|sandbox| sandbox.ip_address.as_deref()),
+            ),
+            service_record.port,
+            service_record.health_path.as_deref(),
+        )
+        .unwrap_or_else(|err| json!({"status": "error", "message": err.to_string()}).to_string())
     } else {
         json!({"status": "not-running"}).to_string()
     };
@@ -799,6 +900,9 @@ pub fn shell_only(paths: &StatePaths, service: &str, command: &[String]) -> Resu
     if program_and_args.len() > 1 {
         cmd.args(&program_and_args[1..]);
     }
+    if let Some(sandbox) = sandbox.as_ref() {
+        crate::sandbox::configure_shell_command(&mut cmd, &sandbox.runtime_kind, sandbox.pid)?;
+    }
     cmd.current_dir(&record.app_path);
     cmd.env("MEGASERVER_SERVICE", service);
     if let Some(port) = manifest.network.port {
@@ -850,6 +954,7 @@ mod tests {
     use super::*;
     use crate::controlplane;
     use crate::state;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -952,5 +1057,91 @@ mod tests {
         .unwrap();
 
         destroy_only(&paths, "hello-service").unwrap();
+    }
+
+    #[test]
+    fn linux_private_network_supports_service_to_service_reachability() {
+        #[cfg(not(target_os = "linux"))]
+        return;
+
+        #[cfg(target_os = "linux")]
+        if !crate::network::linux::isolation_supported() {
+            return;
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("linux-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let alpha_app = write_test_service_app(temp.path(), "alpha-service", 18080, "alpha.local");
+        let beta_app = write_test_service_app(temp.path(), "beta-service", 18081, "beta.local");
+
+        deploy_and_start_only(&paths, &alpha_app).unwrap();
+        deploy_and_start_only(&paths, &beta_app).unwrap();
+
+        let alpha_inspect = inspect_value(&paths, "alpha-service").unwrap();
+        assert_eq!(
+            alpha_inspect["sandbox"]["runtime_kind"].as_str(),
+            Some("linux-namespace")
+        );
+
+        shell_only(
+            &paths,
+            "alpha-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "import socket, urllib.request; ip = socket.gethostbyname('beta-service'); assert ip.startswith('10.42.0.'); body = urllib.request.urlopen('http://beta-service:18081/health', timeout=5).read().decode(); assert body == 'ok\\n'".to_string(),
+            ],
+        )
+        .unwrap();
+
+        destroy_only(&paths, "beta-service").unwrap();
+        destroy_only(&paths, "alpha-service").unwrap();
+    }
+
+    fn write_test_service_app(
+        root: &std::path::Path,
+        name: &str,
+        port: u16,
+        domain: &str,
+    ) -> PathBuf {
+        let app_dir = root.join(name);
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            app_dir.join("server.py"),
+            r#"from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+
+PORT = int(os.environ.get("PORT", "18080"))
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            body = b"ok\n"
+        else:
+            body = f"hello from {os.environ.get('MEGASERVER_SERVICE', 'unknown')}\n".encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+"#,
+        )
+        .unwrap();
+        fs::write(
+            app_dir.join("megaserver.yaml"),
+            format!(
+                "name: {name}\nruntime:\n  command:\n    - python3\n    - server.py\nnetwork:\n  port: {port}\nresources:\n  memory: 64mb\n  cpu: \"1\"\nvolumes: []\nroutes:\n  - {domain}\nhealth:\n  path: /health\n"
+            ),
+        )
+        .unwrap();
+        app_dir
     }
 }

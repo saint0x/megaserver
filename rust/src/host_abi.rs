@@ -1,12 +1,12 @@
 use crate::app;
 use crate::state::{self, StatePaths};
 use serde_json::{Value, json};
+use std::env;
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 static LAST_ERROR: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
-const CONTROL_OUTPUT: &str = "/tmp/megaserver.fzy.control.output.json";
 
 pub fn link_host_abi() {
     let _ = megaserver_host_dispatch as extern "C" fn(*const u8, usize) -> i32;
@@ -30,6 +30,12 @@ fn set_last_error(message: &str) {
     if let Ok(mut slot) = last_error_slot().lock() {
         *slot = bytes;
     }
+}
+
+fn control_output_path() -> PathBuf {
+    env::var_os("MEGASERVER_FZY_CONTROL_OUTPUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/tmp/megaserver.fzy.control.output.json"))
 }
 
 fn resolve_paths(request: &Value) -> anyhow::Result<StatePaths> {
@@ -265,7 +271,7 @@ pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) 
         } else {
             set_last_error("borrowed control input pointer was null with non-zero length");
             let _ = std::fs::write(
-                CONTROL_OUTPUT,
+                control_output_path(),
                 json!({"status":"error","message":"borrowed control input pointer was null with non-zero length","control_plane":"rust-host"}).to_string(),
             );
             return 21;
@@ -277,7 +283,7 @@ pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) 
             Err(err) => {
                 set_last_error(&format!("invalid borrowed control input utf-8: {err}"));
                 let _ = std::fs::write(
-                    CONTROL_OUTPUT,
+                    control_output_path(),
                     json!({"status":"error","message":format!("invalid borrowed control input utf-8: {err}"),"control_plane":"rust-host"}).to_string(),
                 );
                 return 22;
@@ -290,7 +296,7 @@ pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) 
         Err(err) => {
             set_last_error(&format!("invalid control request json: {err}"));
             let _ = std::fs::write(
-                CONTROL_OUTPUT,
+                control_output_path(),
                 json!({"status":"error","message":format!("invalid control request json: {err}"),"control_plane":"rust-host"}).to_string(),
             );
             return 22;
@@ -299,7 +305,7 @@ pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) 
 
     match dispatch_value(&request) {
         Ok(value) => {
-            if let Err(err) = std::fs::write(CONTROL_OUTPUT, value.to_string()) {
+            if let Err(err) = std::fs::write(control_output_path(), value.to_string()) {
                 set_last_error(&format!("write control output failed: {err}"));
                 return 5;
             }
@@ -308,7 +314,7 @@ pub extern "C" fn megaserver_host_dispatch(ptr_borrowed: *const u8, len: usize) 
         Err(err) => {
             set_last_error(&err.to_string());
             let _ = std::fs::write(
-                CONTROL_OUTPUT,
+                control_output_path(),
                 json!({"status":"error","message":err.to_string(),"control_plane":"rust-host"})
                     .to_string(),
             );

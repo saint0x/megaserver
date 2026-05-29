@@ -1,15 +1,12 @@
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::cell::Cell;
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 static FZY_LOCK: Mutex<()> = Mutex::new(());
-const PLANNER_INPUT: &str = "/tmp/megaserver.fzy.plan.input.json";
-const PLANNER_OUTPUT: &str = "/tmp/megaserver.fzy.plan.output.json";
-const CONTROL_INPUT: &str = "/tmp/megaserver.fzy.control.input.json";
-const CONTROL_OUTPUT: &str = "/tmp/megaserver.fzy.control.output.json";
 
 thread_local! {
     static FZY_DEPTH: Cell<usize> = const { Cell::new(0) };
@@ -55,11 +52,18 @@ pub fn planner_schema_version() -> i32 {
 
 pub fn run_planner_with_io(input_payload: &str, output_path: &Path) -> std::io::Result<i32> {
     with_fzy_runtime(|| {
-        fs::write(PLANNER_INPUT, input_payload)?;
-        let _ = fs::remove_file(PLANNER_OUTPUT);
+        let planner_input = scratch_path("megaserver.fzy.plan.input.json");
+        let planner_output = scratch_path("megaserver.fzy.plan.output.json");
+        fs::create_dir_all(planner_input.parent().expect("planner input parent"))?;
+        unsafe {
+            env::set_var("MEGASERVER_FZY_PLAN_INPUT", &planner_input);
+            env::set_var("MEGASERVER_FZY_PLAN_OUTPUT", &planner_output);
+        }
+        fs::write(&planner_input, input_payload)?;
+        let _ = fs::remove_file(&planner_output);
         let code = unsafe { megaserver_fzy_plan_manifest() };
         if code == 0 {
-            fs::copy(PLANNER_OUTPUT, output_path)?;
+            fs::copy(&planner_output, output_path)?;
         }
         Ok(code)
     })
@@ -68,10 +72,17 @@ pub fn run_planner_with_io(input_payload: &str, output_path: &Path) -> std::io::
 pub fn dispatch_control(payload: &Value) -> Result<Value> {
     let input = serde_json::to_string(payload)?;
     with_fzy_runtime(|| {
-        fs::write(CONTROL_INPUT, input).context("write Fzy control input")?;
-        let _ = fs::remove_file(CONTROL_OUTPUT);
+        let control_input = scratch_path("megaserver.fzy.control.input.json");
+        let control_output = scratch_path("megaserver.fzy.control.output.json");
+        fs::create_dir_all(control_input.parent().expect("control input parent"))?;
+        unsafe {
+            env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
+            env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
+        }
+        fs::write(&control_input, input).context("write Fzy control input")?;
+        let _ = fs::remove_file(&control_output);
         let code = unsafe { megaserver_fzy_dispatch_control() };
-        let output = fs::read_to_string(CONTROL_OUTPUT).unwrap_or_default();
+        let output = fs::read_to_string(&control_output).unwrap_or_default();
         if code != 0 && output.is_empty() {
             let message = last_error_message();
             return Err(anyhow!(
@@ -80,6 +91,12 @@ pub fn dispatch_control(payload: &Value) -> Result<Value> {
         }
         serde_json::from_str::<Value>(&output).context("parse Fzy control output")
     })
+}
+
+fn scratch_path(file_name: &str) -> PathBuf {
+    env::temp_dir()
+        .join(format!("megaserver-fzy-{}", std::process::id()))
+        .join(file_name)
 }
 
 pub fn last_error_message() -> String {

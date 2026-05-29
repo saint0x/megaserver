@@ -27,6 +27,15 @@ struct ProxyState {
     ingress_scheme: String,
 }
 
+fn service_target_host(sandbox: Option<&crate::model::SandboxRecord>) -> &str {
+    match sandbox {
+        Some(sandbox) if sandbox.runtime_kind == "linux-namespace" => {
+            sandbox.ip_address.as_deref().unwrap_or("127.0.0.1")
+        }
+        _ => "127.0.0.1",
+    }
+}
+
 pub async fn serve(
     paths: StatePaths,
     bind: SocketAddr,
@@ -82,16 +91,27 @@ async fn proxy_request(
     let service = state::service_by_name(&conn, &route.service_name)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::BAD_GATEWAY)?;
+    let sandbox = state::sandbox_by_service(&conn, &route.service_name)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if service.status != "healthy" && service.status != "degraded" {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let port = route.port.ok_or(StatusCode::BAD_GATEWAY)?;
+    let target_host = service_target_host(sandbox.as_ref());
 
     let is_websocket = is_websocket_upgrade(request.headers());
     if is_websocket {
         let path_and_query = upstream_path(&conn, &route, &service, &host, request.uri())
             .map_err(map_ingress_error)?;
-        return proxy_websocket(state.clone(), request, host, port, path_and_query).await;
+        return proxy_websocket(
+            state.clone(),
+            request,
+            host,
+            target_host.to_string(),
+            port,
+            path_and_query,
+        )
+        .await;
     }
 
     let (parts, body) = request.into_parts();
@@ -102,7 +122,7 @@ async fn proxy_request(
         .to_bytes();
     let path_and_query =
         upstream_path(&conn, &route, &service, &host, &parts.uri).map_err(map_ingress_error)?;
-    let target = format!("http://127.0.0.1:{port}{path_and_query}");
+    let target = format!("http://{target_host}:{port}{path_and_query}");
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut upstream = state.client.request(method, target).body(body_bytes);
@@ -127,6 +147,7 @@ async fn proxy_websocket(
     state: Arc<ProxyState>,
     mut request: Request,
     host: String,
+    target_host: String,
     port: u16,
     path_and_query: String,
 ) -> Result<Response<Body>, StatusCode> {
@@ -159,6 +180,7 @@ async fn proxy_websocket(
             let _ = relay_websocket(
                 upgraded,
                 host,
+                target_host,
                 port,
                 path_and_query,
                 ingress_scheme,
@@ -176,6 +198,7 @@ async fn proxy_websocket(
 async fn relay_websocket(
     upgraded: Upgraded,
     host: String,
+    target_host: String,
     port: u16,
     path_and_query: String,
     ingress_scheme: String,
@@ -187,7 +210,7 @@ async fn relay_websocket(
         None,
     )
     .await;
-    let target = format!("ws://127.0.0.1:{port}{path_and_query}");
+    let target = format!("ws://{target_host}:{port}{path_and_query}");
     let mut upstream_request = target.into_client_request()?;
     upstream_request
         .headers_mut()

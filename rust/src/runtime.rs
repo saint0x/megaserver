@@ -115,12 +115,12 @@ pub fn process_alive(pid: i32) -> bool {
     kill(Pid::from_raw(pid), None).is_ok()
 }
 
-pub fn health_check(port: Option<u16>, health_path: Option<&str>) -> Result<String> {
+pub fn health_check(host: &str, port: Option<u16>, health_path: Option<&str>) -> Result<String> {
     let Some(port) = port else {
         return Ok("no-port-configured".to_string());
     };
     let path = health_path.unwrap_or("/");
-    let url = format!("http://127.0.0.1:{port}{path}");
+    let url = format!("http://{host}:{port}{path}");
     let start = Instant::now();
     let deadline = start + Duration::from_secs(10);
     let agent = ureq::AgentBuilder::new()

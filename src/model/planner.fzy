@@ -1,11 +1,19 @@
 use core.time;
 
 fn input_path() -> str {
-    return "/tmp/megaserver.fzy.plan.input.json"
+    let override = env.get("MEGASERVER_FZY_PLAN_INPUT")
+    if override != "" {
+        return override
+    }
+    return "/var/tmp/megaserver.fzy.plan.input.json"
 }
 
 fn output_path() -> str {
-    return "/tmp/megaserver.fzy.plan.output.json"
+    let override = env.get("MEGASERVER_FZY_PLAN_OUTPUT")
+    if override != "" {
+        return override
+    }
+    return "/var/tmp/megaserver.fzy.plan.output.json"
 }
 
 fn error_payload(message: str) -> str {

@@ -1,181 +1,456 @@
-use anyhow::{Context, Result, bail};
-use ipnet::Ipv4Net;
-use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+pub const SANDBOX_SUBNET: &str = "10.42.0.0/24";
+pub const BRIDGE_NAME: &str = "megabr0";
+pub const BRIDGE_CIDR: &str = "10.42.0.254/24";
+pub const BRIDGE_GATEWAY: &str = "10.42.0.254";
 
 #[cfg(target_os = "linux")]
-use {
-    futures::TryStreamExt,
-    rtnetlink::{Handle, new_connection},
-    std::io::ErrorKind,
-};
+pub mod linux {
+    use super::{BRIDGE_CIDR, BRIDGE_GATEWAY, BRIDGE_NAME, SANDBOX_SUBNET};
+    use anyhow::{Context, Result, bail};
+    use std::collections::hash_map::DefaultHasher;
+    use std::fs;
+    use std::hash::{Hash, Hasher};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
-pub struct IpamManager {
-    state: Arc<RwLock<IpamState>>,
+    #[cfg(test)]
+    use std::collections::HashMap;
+    #[cfg(test)]
+    use std::sync::{Arc, Mutex};
+
+    pub fn isolation_supported() -> bool {
+        is_effective_root()
+            && command_available("ip")
+            && command_available("iptables")
+            && Path::new("/sys/fs/cgroup").exists()
+    }
+
+    pub fn setup_sandbox_network(service_name: &str, sandbox_ip: &str) -> Result<()> {
+        HostNetworkManager::new(SystemRunner).setup_sandbox_network(service_name, sandbox_ip)
+    }
+
+    pub fn cleanup_sandbox_network(service_name: Option<&str>) -> Result<()> {
+        HostNetworkManager::new(SystemRunner).cleanup_sandbox_network(service_name)
+    }
+
+    pub fn netns_name(service_name: &str) -> String {
+        format!("ms-{}", short_id(service_name))
+    }
+
+    pub fn host_veth_name(service_name: &str) -> String {
+        format!("msh{}", short_id(service_name))
+    }
+
+    pub fn guest_veth_name(service_name: &str) -> String {
+        format!("msg{}", short_id(service_name))
+    }
+
+    trait Runner: Clone + Send + Sync + 'static {
+        fn run(&self, program: &str, args: &[&str]) -> Result<String>;
+        fn write_file(&self, path: &Path, contents: &str) -> Result<()>;
+    }
+
+    #[derive(Clone)]
+    struct SystemRunner;
+
+    impl Runner for SystemRunner {
+        fn run(&self, program: &str, args: &[&str]) -> Result<String> {
+            let output = Command::new(program)
+                .args(args)
+                .output()
+                .with_context(|| format!("run `{program} {}`", args.join(" ")))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                bail!("`{program} {}` failed: {stderr}", args.join(" "));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        }
+
+        fn write_file(&self, path: &Path, contents: &str) -> Result<()> {
+            fs::write(path, contents).with_context(|| format!("write {}", path.display()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct HostNetworkManager<R> {
+        runner: R,
+        netns_root: PathBuf,
+    }
+
+    impl<R: Runner> HostNetworkManager<R> {
+        fn new(runner: R) -> Self {
+            Self {
+                runner,
+                netns_root: PathBuf::from("/var/run/netns"),
+            }
+        }
+
+        fn setup_sandbox_network(&self, service_name: &str, sandbox_ip: &str) -> Result<()> {
+            fs::create_dir_all(&self.netns_root)
+                .with_context(|| format!("create {}", self.netns_root.display()))?;
+            self.ensure_host_network()?;
+            self.cleanup_sandbox_network(Some(service_name))?;
+
+            let netns_name = netns_name(service_name);
+            let host_veth = host_veth_name(service_name);
+            let guest_veth = guest_veth_name(service_name);
+
+            self.ip(&["netns", "add", &netns_name])?;
+            self.ip(&[
+                "link",
+                "add",
+                &host_veth,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                &guest_veth,
+            ])?;
+            self.ip(&["link", "set", &host_veth, "master", BRIDGE_NAME])?;
+            self.ip(&["link", "set", &host_veth, "up"])?;
+            self.ip(&["link", "set", &guest_veth, "netns", &netns_name])?;
+            self.ip_netns(&netns_name, &["ip", "link", "set", "lo", "up"])?;
+            self.ip_netns(
+                &netns_name,
+                &["ip", "link", "set", &guest_veth, "name", "eth0"],
+            )?;
+            self.ip_netns(
+                &netns_name,
+                &[
+                    "ip",
+                    "addr",
+                    "replace",
+                    &format!("{sandbox_ip}/24"),
+                    "dev",
+                    "eth0",
+                ],
+            )?;
+            self.ip_netns(&netns_name, &["ip", "link", "set", "eth0", "up"])?;
+            self.ip_netns(
+                &netns_name,
+                &["ip", "route", "replace", "default", "via", BRIDGE_GATEWAY],
+            )?;
+            Ok(())
+        }
+
+        #[cfg(test)]
+        fn with_netns_root(mut self, netns_root: PathBuf) -> Self {
+            self.netns_root = netns_root;
+            self
+        }
+
+        fn cleanup_sandbox_network(&self, service_name: Option<&str>) -> Result<()> {
+            let Some(service_name) = service_name else {
+                return Ok(());
+            };
+            let netns_name = netns_name(service_name);
+            let host_veth = host_veth_name(service_name);
+
+            let _ = self.ip_allow_failure(&["link", "del", &host_veth]);
+            let _ = self.ip_allow_failure(&["netns", "del", &netns_name]);
+            Ok(())
+        }
+
+        fn ensure_host_network(&self) -> Result<()> {
+            if self
+                .ip_allow_failure(&["link", "show", BRIDGE_NAME])
+                .is_err()
+            {
+                self.ip(&["link", "add", BRIDGE_NAME, "type", "bridge"])?;
+            }
+            let _ = self.ip_allow_failure(&["addr", "replace", BRIDGE_CIDR, "dev", BRIDGE_NAME]);
+            self.ip(&["link", "set", BRIDGE_NAME, "up"])?;
+
+            self.runner
+                .write_file(Path::new("/proc/sys/net/ipv4/ip_forward"), "1\n")
+                .context("enable ipv4 forwarding")?;
+
+            let uplink = self.default_uplink_interface()?;
+            self.ensure_iptables_rule(
+                &["-C", "FORWARD", "-i", BRIDGE_NAME, "-j", "ACCEPT"],
+                &["-A", "FORWARD", "-i", BRIDGE_NAME, "-j", "ACCEPT"],
+            )?;
+            self.ensure_iptables_rule(
+                &[
+                    "-C",
+                    "FORWARD",
+                    "-o",
+                    BRIDGE_NAME,
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "RELATED,ESTABLISHED",
+                    "-j",
+                    "ACCEPT",
+                ],
+                &[
+                    "-A",
+                    "FORWARD",
+                    "-o",
+                    BRIDGE_NAME,
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "RELATED,ESTABLISHED",
+                    "-j",
+                    "ACCEPT",
+                ],
+            )?;
+            self.ensure_iptables_rule(
+                &[
+                    "-t",
+                    "nat",
+                    "-C",
+                    "POSTROUTING",
+                    "-s",
+                    SANDBOX_SUBNET,
+                    "-o",
+                    &uplink,
+                    "-j",
+                    "MASQUERADE",
+                ],
+                &[
+                    "-t",
+                    "nat",
+                    "-A",
+                    "POSTROUTING",
+                    "-s",
+                    SANDBOX_SUBNET,
+                    "-o",
+                    &uplink,
+                    "-j",
+                    "MASQUERADE",
+                ],
+            )?;
+            Ok(())
+        }
+
+        fn default_uplink_interface(&self) -> Result<String> {
+            let route = self.ip(&["route", "show", "default"])?;
+            parse_default_interface(&route)
+        }
+
+        fn ensure_iptables_rule(&self, check_args: &[&str], add_args: &[&str]) -> Result<()> {
+            if self.runner.run("iptables", check_args).is_err() {
+                self.runner.run("iptables", add_args)?;
+            }
+            Ok(())
+        }
+
+        fn ip(&self, args: &[&str]) -> Result<String> {
+            self.runner.run("ip", args)
+        }
+
+        fn ip_allow_failure(&self, args: &[&str]) -> Result<String> {
+            self.runner.run("ip", args)
+        }
+
+        fn ip_netns(&self, netns: &str, args: &[&str]) -> Result<String> {
+            let mut full_args = vec!["netns", "exec", netns];
+            full_args.extend_from_slice(args);
+            self.runner.run("ip", &full_args)
+        }
+    }
+
+    fn short_id(service_name: &str) -> String {
+        let mut hasher = DefaultHasher::new();
+        service_name.hash(&mut hasher);
+        format!("{:08x}", hasher.finish() as u32)
+    }
+
+    fn parse_default_interface(route_output: &str) -> Result<String> {
+        let tokens = route_output.split_whitespace().collect::<Vec<_>>();
+        for window in tokens.windows(2) {
+            if window[0] == "dev" {
+                return Ok(window[1].to_string());
+            }
+        }
+        bail!("could not determine default interface from `ip route show default`")
+    }
+
+    fn is_effective_root() -> bool {
+        fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|content| {
+                content.lines().find_map(|line| {
+                    let value = line.strip_prefix("Uid:")?;
+                    value.split_whitespace().next()?.parse::<u32>().ok()
+                })
+            })
+            == Some(0)
+    }
+
+    fn command_available(binary: &str) -> bool {
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .map(|dir| dir.join(binary))
+            .any(|path| path.is_file())
+    }
+
+    #[cfg(test)]
+    #[derive(Clone, Default)]
+    struct FakeRunner {
+        state: Arc<Mutex<FakeState>>,
+    }
+
+    #[cfg(test)]
+    #[derive(Default)]
+    struct FakeState {
+        calls: Vec<String>,
+        outputs: HashMap<String, Result<String, String>>,
+        writes: Vec<(PathBuf, String)>,
+    }
+
+    #[cfg(test)]
+    impl FakeRunner {
+        fn with_output(self, command: &str, output: Result<&str, &str>) -> Self {
+            let mut state = self.state.lock().unwrap();
+            state.outputs.insert(
+                command.to_string(),
+                output
+                    .map(|ok| ok.to_string())
+                    .map_err(|err| err.to_string()),
+            );
+            drop(state);
+            self
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.state.lock().unwrap().calls.clone()
+        }
+
+        fn writes(&self) -> Vec<(PathBuf, String)> {
+            self.state.lock().unwrap().writes.clone()
+        }
+    }
+
+    #[cfg(test)]
+    impl Runner for FakeRunner {
+        fn run(&self, program: &str, args: &[&str]) -> Result<String> {
+            let command = format!("{program} {}", args.join(" "));
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(command.clone());
+            match state.outputs.get(&command) {
+                Some(Ok(output)) => Ok(output.clone()),
+                Some(Err(message)) => bail!("{message}"),
+                None => Ok(String::new()),
+            }
+        }
+
+        fn write_file(&self, path: &Path, contents: &str) -> Result<()> {
+            self.state
+                .lock()
+                .unwrap()
+                .writes
+                .push((path.to_path_buf(), contents.to_string()));
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parses_default_interface_from_route_output() {
+            let route = "default via 172.17.0.1 dev eth0 proto dhcp src 172.17.0.2";
+            assert_eq!(parse_default_interface(route).unwrap(), "eth0");
+        }
+
+        #[test]
+        fn ensures_host_network_with_nat_and_forwarding() {
+            let runner = FakeRunner::default()
+                .with_output("ip link show megabr0", Err("missing bridge"))
+                .with_output(
+                    "ip route show default",
+                    Ok("default via 172.17.0.1 dev eth0 proto dhcp src 172.17.0.2"),
+                )
+                .with_output(
+                    "iptables -C FORWARD -i megabr0 -j ACCEPT",
+                    Err("missing forward rule"),
+                )
+                .with_output(
+                    "iptables -C FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+                    Err("missing established rule"),
+                )
+                .with_output(
+                    "iptables -t nat -C POSTROUTING -s 10.42.0.0/24 -o eth0 -j MASQUERADE",
+                    Err("missing nat rule"),
+                );
+            let manager = HostNetworkManager::new(runner.clone());
+
+            manager.ensure_host_network().unwrap();
+
+            let calls = runner.calls();
+            assert!(calls.contains(&"ip link add megabr0 type bridge".to_string()));
+            assert!(calls.contains(&"ip addr replace 10.42.0.254/24 dev megabr0".to_string()));
+            assert!(calls.contains(&"iptables -A FORWARD -i megabr0 -j ACCEPT".to_string()));
+            assert!(calls.contains(
+                &"iptables -A FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT".to_string()
+            ));
+            assert!(calls.contains(
+                &"iptables -t nat -A POSTROUTING -s 10.42.0.0/24 -o eth0 -j MASQUERADE".to_string()
+            ));
+            assert_eq!(
+                runner.writes(),
+                vec![(
+                    PathBuf::from("/proc/sys/net/ipv4/ip_forward"),
+                    "1\n".to_string()
+                )]
+            );
+        }
+
+        #[test]
+        fn configures_netns_and_veth_for_service() {
+            let runner = FakeRunner::default()
+                .with_output(
+                    "ip route show default",
+                    Ok("default via 172.17.0.1 dev eth0 proto dhcp src 172.17.0.2"),
+                )
+                .with_output(
+                    "iptables -C FORWARD -i megabr0 -j ACCEPT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -t nat -C POSTROUTING -s 10.42.0.0/24 -o eth0 -j MASQUERADE",
+                    Ok(""),
+                );
+            let temp = tempfile::TempDir::new().unwrap();
+            let manager = HostNetworkManager::new(runner.clone())
+                .with_netns_root(temp.path().join("netns"));
+
+            manager
+                .setup_sandbox_network("hello-service", "10.42.0.10")
+                .unwrap();
+
+            let netns = netns_name("hello-service");
+            let host_veth = host_veth_name("hello-service");
+            let guest_veth = guest_veth_name("hello-service");
+            let calls = runner.calls();
+            assert!(calls.contains(&format!("ip netns add {netns}")));
+            assert!(calls.contains(&format!(
+                "ip link add {host_veth} type veth peer name {guest_veth}"
+            )));
+            assert!(calls.contains(&format!("ip link set {guest_veth} netns {netns}")));
+            assert!(calls.contains(&format!(
+                "ip netns exec {netns} ip addr replace 10.42.0.10/24 dev eth0"
+            )));
+            assert!(calls.contains(&format!(
+                "ip netns exec {netns} ip route replace default via 10.42.0.254"
+            )));
+        }
+    }
 }
 
-struct IpamState {
-    subnet: Option<Ipv4Net>,
-    allocated: HashSet<Ipv4Addr>,
+pub fn sandbox_gateway() -> &'static str {
+    BRIDGE_GATEWAY
 }
 
-impl IpamManager {
-    pub fn new() -> Self {
-        Self {
-            state: Arc::new(RwLock::new(IpamState {
-                subnet: None,
-                allocated: HashSet::new(),
-            })),
-        }
-    }
-
-    pub async fn configure_subnet(&self, subnet_str: &str) -> Result<()> {
-        let subnet: Ipv4Net = subnet_str.parse().context("invalid subnet CIDR")?;
-        if subnet.prefix_len() != 24 {
-            bail!("subnet must be /24, got /{}", subnet.prefix_len());
-        }
-        let mut state = self.state.write().await;
-        state.subnet = Some(subnet);
-        state.allocated.clear();
-        Ok(())
-    }
-
-    pub async fn allocate_ip(&self) -> Result<Ipv4Addr> {
-        let mut state = self.state.write().await;
-        let subnet = state.subnet.context("subnet not configured")?;
-        for host in subnet.hosts() {
-            if !state.allocated.contains(&host) {
-                state.allocated.insert(host);
-                return Ok(host);
-            }
-        }
-        bail!("no available IPs in subnet {}", subnet)
-    }
-
-    pub async fn release_ip(&self, ip: Ipv4Addr) {
-        let mut state = self.state.write().await;
-        state.allocated.remove(&ip);
-    }
-}
-
-pub struct RouteManager {
-    state: Arc<RwLock<HashMap<String, String>>>,
-    #[cfg(target_os = "linux")]
-    handle: Handle,
-}
-
-impl RouteManager {
-    #[cfg(target_os = "linux")]
-    pub async fn new() -> Result<Self> {
-        let (connection, handle, _) =
-            new_connection().context("failed to create netlink connection")?;
-        tokio::spawn(connection);
-        Ok(Self {
-            state: Arc::new(RwLock::new(HashMap::new())),
-            handle,
-        })
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub async fn new() -> Result<Self> {
-        Ok(Self {
-            state: Arc::new(RwLock::new(HashMap::new())),
-        })
-    }
-
-    #[cfg(target_os = "linux")]
-    pub async fn add_route(&self, destination: &str, interface: &str) -> Result<()> {
-        let subnet: Ipv4Net = destination.parse().context("invalid destination subnet")?;
-        let mut links = self
-            .handle
-            .link()
-            .get()
-            .match_name(interface.to_string())
-            .execute();
-        let link = links
-            .try_next()
-            .await
-            .context("failed to query interface")?
-            .context(format!("interface `{interface}` not found"))?;
-        let if_index = link.header.index;
-        match self
-            .handle
-            .route()
-            .add()
-            .v4()
-            .destination_prefix(subnet.network(), subnet.prefix_len())
-            .output_interface(if_index)
-            .execute()
-            .await
-        {
-            Ok(_) => {
-                self.state
-                    .write()
-                    .await
-                    .insert(destination.to_string(), interface.to_string());
-                Ok(())
-            }
-            Err(err) => {
-                if let Some(io_err) = err.downcast_ref::<std::io::Error>()
-                    && io_err.kind() == ErrorKind::AlreadyExists
-                {
-                    self.state
-                        .write()
-                        .await
-                        .insert(destination.to_string(), interface.to_string());
-                    return Ok(());
-                }
-                bail!("failed to add route: {err}")
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub async fn add_route(&self, destination: &str, interface: &str) -> Result<()> {
-        self.state
-            .write()
-            .await
-            .insert(destination.to_string(), interface.to_string());
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    pub async fn remove_route(&self, destination: &str) -> Result<()> {
-        let subnet: Ipv4Net = destination.parse().context("invalid destination subnet")?;
-        match self
-            .handle
-            .route()
-            .del()
-            .v4()
-            .destination_prefix(subnet.network(), subnet.prefix_len())
-            .execute()
-            .await
-        {
-            Ok(_) => {
-                self.state.write().await.remove(destination);
-                Ok(())
-            }
-            Err(err) => {
-                if let Some(io_err) = err.downcast_ref::<std::io::Error>()
-                    && (io_err.kind() == ErrorKind::NotFound || io_err.raw_os_error() == Some(3))
-                {
-                    self.state.write().await.remove(destination);
-                    return Ok(());
-                }
-                bail!("failed to remove route: {err}")
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub async fn remove_route(&self, destination: &str) -> Result<()> {
-        self.state.write().await.remove(destination);
-        Ok(())
-    }
-
-    pub async fn routes(&self) -> HashMap<String, String> {
-        self.state.read().await.clone()
-    }
+pub fn sandbox_subnet() -> &'static str {
+    SANDBOX_SUBNET
 }

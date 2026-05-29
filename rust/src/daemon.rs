@@ -424,8 +424,18 @@ async fn reconcile_once(state: &Arc<DaemonState>) -> Result<()> {
                 continue;
             }
             if alive && service.port.is_some() {
-                let health =
-                    crate::runtime::health_check(service.port, service.health_path.as_deref());
+                let sandbox = state::sandbox_by_service(&conn, &service.name)?;
+                let target_host = match sandbox.as_ref() {
+                    Some(sandbox) if sandbox.runtime_kind == "linux-namespace" => {
+                        sandbox.ip_address.as_deref().unwrap_or("127.0.0.1")
+                    }
+                    _ => "127.0.0.1",
+                };
+                let health = crate::runtime::health_check(
+                    target_host,
+                    service.port,
+                    service.health_path.as_deref(),
+                );
                 let next = if health.is_ok() {
                     "healthy"
                 } else {

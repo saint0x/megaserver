@@ -5,6 +5,7 @@ use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct SandboxLaunchMetadata {
+    pub service_name: Option<String>,
     pub runtime_kind: String,
     pub isolation_mode: String,
     pub cgroup_path: Option<String>,
@@ -13,6 +14,7 @@ pub struct SandboxLaunchMetadata {
 impl SandboxLaunchMetadata {
     fn host_process() -> Self {
         Self {
+            service_name: None,
             runtime_kind: "host-process".to_string(),
             isolation_mode: "process-supervision".to_string(),
             cgroup_path: None,
@@ -39,7 +41,17 @@ pub fn configure_command(
 ) -> Result<SandboxLaunchMetadata> {
     #[cfg(target_os = "linux")]
     {
-        return linux::configure_command(command, service_name, runtime_dir, manifest, sandbox_env);
+        if crate::network::linux::isolation_supported() {
+            return linux::configure_command(
+                command,
+                service_name,
+                runtime_dir,
+                manifest,
+                sandbox_env,
+            );
+        }
+        let _ = (command, service_name, runtime_dir, manifest, sandbox_env);
+        return Ok(SandboxLaunchMetadata::host_process());
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -60,6 +72,25 @@ pub fn cleanup_sandbox(metadata: &SandboxLaunchMetadata) -> Result<()> {
         let _ = metadata;
         Ok(())
     }
+}
+
+pub fn configure_shell_command(
+    command: &mut Command,
+    runtime_kind: &str,
+    sandbox_pid: Option<i32>,
+) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if runtime_kind == "linux-namespace"
+            && crate::network::linux::isolation_supported()
+            && let Some(pid) = sandbox_pid
+        {
+            return linux::configure_command_for_existing_sandbox(command, pid);
+        }
+    }
+
+    let _ = (command, runtime_kind, sandbox_pid);
+    Ok(())
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -132,14 +163,16 @@ fn resource_config(manifest: &ServiceManifest) -> Result<SandboxResourceConfig> 
 mod linux {
     use super::{SandboxLaunchMetadata, resource_config};
     use crate::manifest::ServiceManifest;
+    use crate::network;
     use anyhow::{Context, Result};
     use nix::mount::{MsFlags, mount};
-    use nix::sched::{CloneFlags, unshare};
+    use nix::sched::{CloneFlags, setns, unshare};
     use nix::unistd::{sethostname, setsid};
     use std::fs;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::{fs::File, os::fd::AsFd};
 
     pub fn configure_command(
         command: &mut Command,
@@ -153,17 +186,31 @@ mod linux {
             .find(|(key, _)| key == "MEGASERVER_SANDBOX_HOSTNAME")
             .map(|(_, value)| value.clone())
             .unwrap_or_else(|| format!("{service_name}.sandbox.megaserver"));
+        let sandbox_ip = sandbox_env
+            .iter()
+            .find(|(key, _)| key == "MEGASERVER_SANDBOX_IP")
+            .map(|(_, value)| value.clone())
+            .context("missing MEGASERVER_SANDBOX_IP")?;
         let cgroup_path =
             prepare_cgroup(service_name, manifest).context("prepare sandbox cgroup")?;
         let runtime_mount = runtime_dir.join("sandbox");
         fs::create_dir_all(&runtime_mount)
             .with_context(|| format!("create sandbox runtime dir {}", runtime_mount.display()))?;
+        let hosts_path = runtime_mount.join("hosts");
+        let hosts_mount = hosts_path.exists().then_some(hosts_path.clone());
+        let netns_name = network::linux::netns_name(service_name);
+        network::linux::setup_sandbox_network(service_name, &sandbox_ip)
+            .context("prepare sandbox network")?;
+
         let cgroup_path_for_exec = cgroup_path.clone();
         let hostname_for_exec = hostname.clone();
+        let netns_path = PathBuf::from("/var/run/netns").join(&netns_name);
 
         unsafe {
             command.pre_exec(move || {
                 setsid().map_err(std::io::Error::other)?;
+                let netns = File::open(&netns_path).map_err(std::io::Error::other)?;
+                setns(netns.as_fd(), CloneFlags::CLONE_NEWNET).map_err(std::io::Error::other)?;
                 unshare(
                     CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWIPC,
                 )
@@ -177,6 +224,16 @@ mod linux {
                     None::<&str>,
                 )
                 .map_err(std::io::Error::other)?;
+                if let Some(hosts_path) = &hosts_mount {
+                    mount(
+                        Some(hosts_path.as_path()),
+                        "/etc/hosts",
+                        None::<&str>,
+                        MsFlags::MS_BIND,
+                        None::<&str>,
+                    )
+                    .map_err(std::io::Error::other)?;
+                }
                 if let Some(cgroup_path) = &cgroup_path_for_exec {
                     join_cgroup(cgroup_path).map_err(std::io::Error::other)?;
                 }
@@ -185,24 +242,46 @@ mod linux {
         }
 
         Ok(SandboxLaunchMetadata {
+            service_name: Some(service_name.to_string()),
             runtime_kind: "linux-namespace".to_string(),
             isolation_mode: if cgroup_path.is_some() {
-                "uts+mount+ipc+cgroup".to_string()
+                "net+uts+mount+ipc+cgroup".to_string()
             } else {
-                "uts+mount+ipc".to_string()
+                "net+uts+mount+ipc".to_string()
             },
             cgroup_path: cgroup_path.map(|path| path.display().to_string()),
         })
     }
 
     pub fn cleanup_sandbox(metadata: &SandboxLaunchMetadata) -> Result<()> {
+        if metadata.runtime_kind != "linux-namespace" {
+            return Ok(());
+        }
         let Some(path) = metadata.cgroup_path.as_ref() else {
+            network::linux::cleanup_sandbox_network(metadata.service_name.as_deref())?;
             return Ok(());
         };
         let path = PathBuf::from(path);
         if path.exists() {
-            fs::remove_dir_all(&path)
-                .with_context(|| format!("remove cgroup {}", path.display()))?;
+            fs::remove_dir(&path).with_context(|| format!("remove cgroup {}", path.display()))?;
+        }
+        network::linux::cleanup_sandbox_network(metadata.service_name.as_deref())?;
+        Ok(())
+    }
+
+    pub fn configure_command_for_existing_sandbox(
+        command: &mut Command,
+        sandbox_pid: i32,
+    ) -> Result<()> {
+        let namespaces = SandboxNamespaces::from_pid(sandbox_pid)?;
+        unsafe {
+            command.pre_exec(move || {
+                join_namespace(&namespaces.net, CloneFlags::CLONE_NEWNET)?;
+                join_namespace(&namespaces.uts, CloneFlags::CLONE_NEWUTS)?;
+                join_namespace(&namespaces.mount, CloneFlags::CLONE_NEWNS)?;
+                join_namespace(&namespaces.ipc, CloneFlags::CLONE_NEWIPC)?;
+                Ok(())
+            });
         }
         Ok(())
     }
@@ -210,7 +289,10 @@ mod linux {
     fn prepare_cgroup(service_name: &str, manifest: &ServiceManifest) -> Result<Option<PathBuf>> {
         let root = Path::new("/sys/fs/cgroup");
         if !root.exists() {
-            return Ok(None);
+            anyhow::bail!(
+                "linux sandboxing requires cgroup v2 root at {}",
+                root.display()
+            );
         }
         let sandbox_root = root.join("megaserver");
         fs::create_dir_all(&sandbox_root)
@@ -252,6 +334,30 @@ mod linux {
         let procs = cgroup_path.join("cgroup.procs");
         fs::write(&procs, "0").with_context(|| format!("join cgroup {}", cgroup_path.display()))?;
         Ok(())
+    }
+
+    struct SandboxNamespaces {
+        net: PathBuf,
+        uts: PathBuf,
+        mount: PathBuf,
+        ipc: PathBuf,
+    }
+
+    impl SandboxNamespaces {
+        fn from_pid(pid: i32) -> Result<Self> {
+            let root = PathBuf::from(format!("/proc/{pid}/ns"));
+            Ok(Self {
+                net: root.join("net"),
+                uts: root.join("uts"),
+                mount: root.join("mnt"),
+                ipc: root.join("ipc"),
+            })
+        }
+    }
+
+    fn join_namespace(path: &Path, flag: CloneFlags) -> std::io::Result<()> {
+        let namespace = File::open(path)?;
+        setns(namespace.as_fd(), flag).map_err(std::io::Error::other)
     }
 }
 
