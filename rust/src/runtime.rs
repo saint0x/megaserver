@@ -21,6 +21,19 @@ pub struct SpawnedService {
     pub cgroup_path: Option<String>,
 }
 
+pub fn prepare_service_workspace(
+    paths: &StatePaths,
+    service_name: &str,
+    app_path: &Path,
+) -> Result<PathBuf> {
+    let workspace_root = paths.service_runtime_dir(service_name).join("workspace");
+    let app_snapshot = workspace_root.join("app");
+    let _ = fs::remove_dir_all(&workspace_root);
+    fs::create_dir_all(&app_snapshot)?;
+    copy_tree(app_path, &app_snapshot)?;
+    Ok(app_snapshot)
+}
+
 pub fn spawn_service(
     paths: &StatePaths,
     service_name: &str,
@@ -32,6 +45,7 @@ pub fn spawn_service(
 ) -> Result<SpawnedService> {
     let logs_dir = paths.service_logs_dir(service_name);
     let runtime_dir = paths.service_runtime_dir(service_name);
+    let workspace_app = prepare_service_workspace(paths, service_name, app_path)?;
     fs::create_dir_all(&logs_dir)?;
     fs::create_dir_all(&runtime_dir)?;
 
@@ -72,6 +86,8 @@ pub fn spawn_service(
     let sandbox = sandbox::configure_command(
         &mut command,
         service_name,
+        app_path,
+        &workspace_app,
         &runtime_dir,
         manifest,
         sandbox_env,
@@ -198,4 +214,32 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn prepares_service_workspace_from_app_source() {
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("home"))).unwrap();
+        crate::state::init(&paths).unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("nested")).unwrap();
+        fs::write(app.join("server.py"), "print('ok')\n").unwrap();
+        fs::write(app.join("nested").join("config.txt"), "hello\n").unwrap();
+
+        let staged = prepare_service_workspace(&paths, "demo", &app).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(staged.join("server.py")).unwrap(),
+            "print('ok')\n"
+        );
+        assert_eq!(
+            fs::read_to_string(staged.join("nested").join("config.txt")).unwrap(),
+            "hello\n"
+        );
+    }
 }

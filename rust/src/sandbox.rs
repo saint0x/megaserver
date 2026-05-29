@@ -35,6 +35,8 @@ struct SandboxResourceConfig {
 pub fn configure_command(
     command: &mut Command,
     service_name: &str,
+    app_path: &Path,
+    workspace_app: &Path,
     runtime_dir: &Path,
     manifest: &ServiceManifest,
     sandbox_env: &[(String, String)],
@@ -45,18 +47,36 @@ pub fn configure_command(
             return linux::configure_command(
                 command,
                 service_name,
+                app_path,
+                workspace_app,
                 runtime_dir,
                 manifest,
                 sandbox_env,
             );
         }
-        let _ = (command, service_name, runtime_dir, manifest, sandbox_env);
+        let _ = (
+            command,
+            service_name,
+            app_path,
+            workspace_app,
+            runtime_dir,
+            manifest,
+            sandbox_env,
+        );
         return Ok(SandboxLaunchMetadata::host_process());
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (command, service_name, runtime_dir, manifest, sandbox_env);
+        let _ = (
+            command,
+            service_name,
+            app_path,
+            workspace_app,
+            runtime_dir,
+            manifest,
+            sandbox_env,
+        );
         Ok(SandboxLaunchMetadata::host_process())
     }
 }
@@ -177,6 +197,8 @@ mod linux {
     pub fn configure_command(
         command: &mut Command,
         service_name: &str,
+        app_path: &Path,
+        workspace_app: &Path,
         runtime_dir: &Path,
         manifest: &ServiceManifest,
         sandbox_env: &[(String, String)],
@@ -215,6 +237,8 @@ mod linux {
         let cgroup_path_for_exec = cgroup_path.clone();
         let hostname_for_exec = hostname.clone();
         let netns_path = PathBuf::from("/var/run/netns").join(&netns_name);
+        let app_path_for_exec = app_path.to_path_buf();
+        let workspace_app_for_exec = workspace_app.to_path_buf();
 
         unsafe {
             command.pre_exec(move || {
@@ -234,6 +258,23 @@ mod linux {
                     None::<&str>,
                 )
                 .map_err(std::io::Error::other)?;
+                mount(
+                    Some(workspace_app_for_exec.as_path()),
+                    app_path_for_exec.as_path(),
+                    None::<&str>,
+                    MsFlags::MS_BIND | MsFlags::MS_REC,
+                    None::<&str>,
+                )
+                .map_err(std::io::Error::other)?;
+                mount(
+                    Some(workspace_app_for_exec.as_path()),
+                    app_path_for_exec.as_path(),
+                    None::<&str>,
+                    MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                    None::<&str>,
+                )
+                .map_err(std::io::Error::other)?;
+                std::env::set_current_dir(&app_path_for_exec).map_err(std::io::Error::other)?;
                 if let Some(hosts_path) = &hosts_mount {
                     mount(
                         Some(hosts_path.as_path()),
