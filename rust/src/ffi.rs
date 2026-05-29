@@ -76,14 +76,14 @@ pub fn planner_schema_version() -> i32 {
 }
 
 pub fn run_planner_with_io(input_payload: &str, output_path: &Path) -> std::io::Result<i32> {
+    let planner_input = scratch_path("megaserver.fzy.plan.input.json");
+    let planner_output = scratch_path("megaserver.fzy.plan.output.json");
+    fs::create_dir_all(planner_input.parent().expect("planner input parent"))?;
+    unsafe {
+        env::set_var("MEGASERVER_FZY_PLAN_INPUT", &planner_input);
+        env::set_var("MEGASERVER_FZY_PLAN_OUTPUT", &planner_output);
+    }
     with_fzy_runtime(|| {
-        let planner_input = scratch_path("megaserver.fzy.plan.input.json");
-        let planner_output = scratch_path("megaserver.fzy.plan.output.json");
-        fs::create_dir_all(planner_input.parent().expect("planner input parent"))?;
-        unsafe {
-            env::set_var("MEGASERVER_FZY_PLAN_INPUT", &planner_input);
-            env::set_var("MEGASERVER_FZY_PLAN_OUTPUT", &planner_output);
-        }
         fs::write(&planner_input, input_payload)?;
         let _ = fs::remove_file(&planner_output);
         let code = unsafe { megaserver_fzy_plan_manifest() };
@@ -96,16 +96,19 @@ pub fn run_planner_with_io(input_payload: &str, output_path: &Path) -> std::io::
 
 pub fn dispatch_control(payload: &Value) -> Result<Value> {
     let input = serde_json::to_string(payload)?;
+    let control_input = scratch_path("megaserver.fzy.control.input.json");
+    let control_output = scratch_path("megaserver.fzy.control.output.json");
+    let host_input = scratch_path("megaserver.fzy.host.input.json");
+    let host_output = scratch_path("megaserver.fzy.host.output.json");
+    fs::create_dir_all(control_input.parent().expect("control input parent"))
+        .context("create Fzy control scratch dir")?;
+    unsafe {
+        env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
+        env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
+        env::remove_var("MEGASERVER_FZY_HOST_INPUT");
+        env::remove_var("MEGASERVER_FZY_HOST_OUTPUT");
+    }
     with_fzy_runtime(|| {
-        let control_input = scratch_path("megaserver.fzy.control.input.json");
-        let control_output = scratch_path("megaserver.fzy.control.output.json");
-        let host_input = scratch_path("megaserver.fzy.host.input.json");
-        let host_output = scratch_path("megaserver.fzy.host.output.json");
-        fs::create_dir_all(control_input.parent().expect("control input parent"))?;
-        unsafe {
-            env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
-            env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
-        }
         fs::write(&control_input, input).context("write Fzy control input")?;
         let _ = fs::remove_file(&control_output);
         let _ = fs::remove_file(&host_input);
@@ -165,14 +168,14 @@ mod tests {
         })
         .to_string();
 
+        std::fs::create_dir_all(temp.path()).expect("scratch dir");
+        unsafe {
+            env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
+            env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
+            env::remove_var("MEGASERVER_FZY_HOST_INPUT");
+            env::remove_var("MEGASERVER_FZY_HOST_OUTPUT");
+        }
         with_fzy_runtime(|| {
-            std::fs::create_dir_all(temp.path()).expect("scratch dir");
-            unsafe {
-                env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
-                env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
-                env::remove_var("MEGASERVER_FZY_HOST_INPUT");
-                env::remove_var("MEGASERVER_FZY_HOST_OUTPUT");
-            }
             std::fs::write(&control_input, &payload).expect("control input");
             let _ = std::fs::remove_file(&control_output);
             let _ = std::fs::remove_file(&host_input);
