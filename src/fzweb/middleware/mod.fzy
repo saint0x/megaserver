@@ -126,7 +126,7 @@ fn before_dispatch(
     app_cfg: fzweb.app.App,
     decision: fzweb.app.RouteDecision,
     policy: Policy,
-    state: RateState,
+    state: RateState
 ) -> GateResult {
     let mut next_state = state
 

@@ -91,7 +91,7 @@ fn control_request(
     }
 }
 
-fn context(decision: fzweb.app.RouteDecision, req: RequestEnvelope) -> RequestContext {
+fn context(decision: RouteDecision, req: RequestEnvelope) -> RequestContext {
     return RequestContext {
         route_id: decision.route_id,
         route_name: decision.route_name,
@@ -298,3 +298,4 @@ fn json_optional_str(payload: JsonHandle, key: str) -> str {
 fn json_optional_raw(payload: JsonHandle, key: str) -> str {
     return json.get_str(json.get(payload, key), "raw")
 }
+use app;
