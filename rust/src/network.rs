@@ -286,8 +286,34 @@ pub mod linux {
                 ],
             )?;
             self.ensure_iptables_rule(
-                &["-C", INPUT_CHAIN, "-i", BRIDGE_NAME, "-j", "RETURN"],
-                &["-A", INPUT_CHAIN, "-i", BRIDGE_NAME, "-j", "RETURN"],
+                &[
+                    "-C",
+                    INPUT_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    "53",
+                    "-j",
+                    "ACCEPT",
+                ],
+                &[
+                    "-A",
+                    INPUT_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    "53",
+                    "-j",
+                    "ACCEPT",
+                ],
+            )?;
+            self.ensure_iptables_rule(
+                &["-C", INPUT_CHAIN, "-i", BRIDGE_NAME, "-j", "DROP"],
+                &["-A", INPUT_CHAIN, "-i", BRIDGE_NAME, "-j", "DROP"],
             )?;
             self.ensure_iptables_rule(
                 &[
@@ -493,8 +519,12 @@ pub mod linux {
                     Err("missing dns rule"),
                 )
                 .with_output(
-                    "iptables -C MEGASERVER-INPUT -i megabr0 -j RETURN",
-                    Err("missing return rule"),
+                    "iptables -C MEGASERVER-INPUT -i megabr0 -p tcp --dport 53 -j ACCEPT",
+                    Err("missing tcp dns rule"),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-INPUT -i megabr0 -j DROP",
+                    Err("missing input drop rule"),
                 )
                 .with_output(
                     "iptables -t nat -C POSTROUTING -s 10.42.0.0/24 -o eth0 -j MASQUERADE",
@@ -524,9 +554,10 @@ pub mod linux {
             assert!(calls.contains(
                 &"iptables -A MEGASERVER-INPUT -i megabr0 -p udp --dport 53 -j ACCEPT".to_string()
             ));
-            assert!(
-                calls.contains(&"iptables -A MEGASERVER-INPUT -i megabr0 -j RETURN".to_string())
-            );
+            assert!(calls.contains(
+                &"iptables -A MEGASERVER-INPUT -i megabr0 -p tcp --dport 53 -j ACCEPT".to_string()
+            ));
+            assert!(calls.contains(&"iptables -A MEGASERVER-INPUT -i megabr0 -j DROP".to_string()));
             assert!(calls.contains(
                 &"iptables -t nat -A POSTROUTING -s 10.42.0.0/24 -o eth0 -j MASQUERADE".to_string()
             ));
@@ -575,7 +606,11 @@ pub mod linux {
                     Ok(""),
                 )
                 .with_output(
-                    "iptables -C MEGASERVER-INPUT -i megabr0 -j RETURN",
+                    "iptables -C MEGASERVER-INPUT -i megabr0 -p tcp --dport 53 -j ACCEPT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-INPUT -i megabr0 -j DROP",
                     Ok(""),
                 )
                 .with_output(
