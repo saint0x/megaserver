@@ -16,12 +16,31 @@ fn main() {
 
     let build_dir = repo_root.join(".fz/build");
     let static_lib = build_dir.join("libmegaserver.a");
+    let shared_lib = build_dir.join("libmegaserver.so");
     let object = build_dir.join("megaserver.o");
     let header = repo_root.join("include/megaserver.h");
     let abi_manifest = repo_root.join("include/megaserver.abi.json");
+    let artifact_manifest = repo_root.join("include/megaserver.artifacts.json");
+    for output in [
+        &static_lib,
+        &shared_lib,
+        &object,
+        &header,
+        &abi_manifest,
+        &artifact_manifest,
+    ] {
+        println!("cargo:rerun-if-changed={}", output.display());
+    }
     if needs_fz_build(
         &source_inputs,
-        &[&static_lib, &object, &header, &abi_manifest],
+        &[
+            &static_lib,
+            &shared_lib,
+            &object,
+            &header,
+            &abi_manifest,
+            &artifact_manifest,
+        ],
     ) {
         let status = Command::new("fz")
             .arg("build")
