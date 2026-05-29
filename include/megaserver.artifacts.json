@@ -1,13 +1,13 @@
 {
-  "abiManifest": "/Users/deepsaint/Desktop/megaserver/include/megaserver.abi.json",
-  "artifactManifest": "/Users/deepsaint/Desktop/megaserver/include/megaserver.artifacts.json",
+  "abiManifest": "megaserver.abi.json",
+  "artifactManifest": "megaserver.artifacts.json",
   "buildMode": "lib",
   "exports": [
     "megaserver_fzy_schema_version",
     "megaserver_fzy_plan_manifest",
     "megaserver_fzy_dispatch_control"
   ],
-  "header": "/Users/deepsaint/Desktop/megaserver/include/megaserver.h",
+  "header": "megaserver.h",
   "hostLifecycle": {
     "cleanup": "fz_host_cleanup",
     "init": "fz_host_init",
@@ -20,9 +20,9 @@
   },
   "module": "main",
   "profile": "dev",
-  "projectRoot": "/Users/deepsaint/Desktop/megaserver",
+  "projectRoot": "..",
   "schemaVersion": "fozzylang.interop_artifacts.v1",
-  "sharedLib": "/Users/deepsaint/Desktop/megaserver/.fz/build/libmegaserver.dylib",
-  "source": "/Users/deepsaint/Desktop/megaserver/src/main.fzy",
-  "staticLib": "/Users/deepsaint/Desktop/megaserver/.fz/build/libmegaserver.a"
+  "sharedLib": "../.fz/build/libmegaserver.so",
+  "source": "../src/main.fzy",
+  "staticLib": "../.fz/build/libmegaserver.a"
 }

@@ -1,9 +1,9 @@
 {
   "abiRevision": 1,
   "callbackAbi": "signature-typed-v1",
-  "compilerIdentityHash": "2f94649a8a371971b258cab36540b6e23fb8dcfa574a9ad138f357b1aaa1c1d7",
+  "compilerIdentityHash": "be4ccaac226915ab0badbc1c928bbce6998a143146c96e9d31674440aecddd6e",
   "contractSchema": "fozzylang.ffi_contracts.v1",
-  "dataLayoutHash": "4ef19cf377b4271c24656e2451536d23b76c8d7e35289fdb42706f8eff5d7afa",
+  "dataLayoutHash": "87f27c55c1ee3975dffddd3f355c3f0c3f11a4810cc15ff26271298d18b256fb",
   "exports": [
     {
       "async": false,
@@ -114,5 +114,5 @@
   "reprCLayouts": [],
   "schemaVersion": "fozzylang.ffi_abi.v1",
   "symbolVersioning": "strict-name-signature-v1",
-  "targetTriple": "aarch64-apple-darwin"
+  "targetTriple": "aarch64-unknown-linux"
 }
