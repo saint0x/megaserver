@@ -77,6 +77,29 @@ fn request_drop_headers() -> str {
     return "host,connection,keep-alive,proxy-authenticate,proxy-authorization,te,trailer,transfer-encoding,upgrade,x-forwarded-host,x-forwarded-proto,x-forwarded-port"
 }
 
+fn response_drop_headers() -> str {
+    return "connection,keep-alive,proxy-authenticate,proxy-authorization,te,trailer,transfer-encoding,upgrade"
+}
+
+fn set_request_headers(host: str, scheme: str, port: str, websocket_protocol: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "x-forwarded-host", json.str(host))
+    discard map.set(payload, "x-forwarded-proto", json.str(scheme))
+    discard map.set(payload, "x-forwarded-port", json.str(port))
+    if websocket_protocol != "" {
+        discard map.set(payload, "sec-websocket-protocol", json.str(websocket_protocol))
+    }
+    return json.object(payload)
+}
+
+fn set_response_headers(websocket_protocol: str) -> str {
+    let payload = map.new()
+    if websocket_protocol != "" {
+        discard map.set(payload, "sec-websocket-protocol", json.str(websocket_protocol))
+    }
+    return json.object(payload)
+}
+
 fn authority_host(authority: str) -> str {
     if str.starts_with(authority, "[") == 1 {
         let close = find_char(authority, "]")
@@ -131,14 +154,11 @@ fn plan_json(
     discard map.set(payload, "upstream_host", json.str(json.get_str(parsed, "upstream_host")))
     discard map.set(payload, "upstream_port", json.raw(json.get_str(json.get(parsed, "upstream_port"), "raw")))
     discard map.set(payload, "upstream_path", json.str(json.get_str(parsed, "upstream_path")))
-    discard map.set(payload, "forwarded_host", json.str(lookup_host))
-    discard map.set(payload, "forwarded_proto", json.str(scheme))
-    discard map.set(payload, "forwarded_port", json.str(forwarded_port))
     discard map.set(payload, "drop_request_headers", json.str(request_drop_headers()))
+    discard map.set(payload, "drop_response_headers", json.str(response_drop_headers()))
+    discard map.set(payload, "set_request_headers", json.raw(set_request_headers(lookup_host, scheme, forwarded_port, websocket_protocol)))
+    discard map.set(payload, "set_response_headers", json.raw(set_response_headers(websocket_protocol)))
     discard map.set(payload, "service", json.str(json.get_str(parsed, "service")))
-    if websocket_protocol != "" {
-        discard map.set(payload, "sec_websocket_protocol", json.str(websocket_protocol))
-    }
     discard map.set(payload, "control_plane", json.str("fzy"))
     return json.object(payload)
 }

@@ -1214,8 +1214,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan["status"].as_str(), Some("ok"));
-        assert_eq!(plan["forwarded_host"].as_str(), Some("hello.local"));
-        assert_eq!(plan["forwarded_port"].as_str(), Some("8443"));
+        assert_eq!(
+            plan["set_request_headers"]["x-forwarded-host"].as_str(),
+            Some("hello.local")
+        );
+        assert_eq!(
+            plan["set_request_headers"]["x-forwarded-port"].as_str(),
+            Some("8443")
+        );
         assert_eq!(plan["upstream_path"].as_str(), Some("/health"));
 
         destroy_only(&paths, "hello-service").unwrap();
@@ -1261,6 +1267,24 @@ mod tests {
         assert!(drop_headers.contains("x-forwarded-host"));
         assert!(drop_headers.contains("x-forwarded-proto"));
         assert!(drop_headers.contains("x-forwarded-port"));
+
+        assert_eq!(
+            plan["set_request_headers"]["x-forwarded-host"].as_str(),
+            Some("hello.local")
+        );
+        assert_eq!(
+            plan["set_request_headers"]["x-forwarded-proto"].as_str(),
+            Some("https")
+        );
+        assert_eq!(
+            plan["set_request_headers"]["x-forwarded-port"].as_str(),
+            Some("8443")
+        );
+
+        let response_drop_headers = plan["drop_response_headers"].as_str().unwrap_or("");
+        assert!(response_drop_headers.contains("connection"));
+        assert!(response_drop_headers.contains("transfer-encoding"));
+        assert!(response_drop_headers.contains("upgrade"));
 
         destroy_only(&paths, "hello-service").unwrap();
         cleanup_hello_service(&repo_root);

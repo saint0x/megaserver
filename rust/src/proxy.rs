@@ -6,7 +6,7 @@ use axum::{
     Router,
     body::Body,
     extract::{Request, State},
-    http::{HeaderMap, Response, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
     routing::any,
 };
 use base64::Engine;
@@ -34,11 +34,10 @@ struct ProxyPlan {
     upstream_host: String,
     upstream_port: u16,
     upstream_path: String,
-    forwarded_host: String,
-    forwarded_proto: String,
-    forwarded_port: String,
     drop_request_headers: String,
-    websocket_protocol: Option<String>,
+    drop_response_headers: String,
+    set_request_headers: Vec<(String, String)>,
+    set_response_headers: Vec<(String, String)>,
 }
 
 pub async fn serve(
@@ -96,13 +95,11 @@ async fn proxy_request(
     if plan.proxy_kind == "websocket" {
         return proxy_websocket(
             request,
-            plan.forwarded_host,
             plan.upstream_host,
             plan.upstream_port,
             plan.upstream_path,
-            plan.forwarded_proto,
-            plan.forwarded_port,
-            plan.websocket_protocol,
+            plan.set_request_headers,
+            plan.set_response_headers,
         )
         .await;
     }
@@ -131,6 +128,9 @@ async fn proxy_request(
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
     let mut out = Response::builder().status(status);
     for (name, value) in &headers {
+        if header_is_dropped(name.as_str(), &plan.drop_response_headers) {
+            continue;
+        }
         out = out.header(name, value);
     }
     out.body(Body::from(bytes))
@@ -139,13 +139,11 @@ async fn proxy_request(
 
 async fn proxy_websocket(
     mut request: Request,
-    host: String,
     target_host: String,
     port: u16,
     path_and_query: String,
-    ingress_scheme: String,
-    ingress_port: String,
-    protocol: Option<String>,
+    request_headers: Vec<(String, String)>,
+    response_headers: Vec<(String, String)>,
 ) -> Result<Response<Body>, StatusCode> {
     let sec_key = request
         .headers()
@@ -160,8 +158,8 @@ async fn proxy_websocket(
         .header("connection", "upgrade")
         .header("upgrade", "websocket")
         .header("sec-websocket-accept", response_key);
-    if let Some(protocol) = &protocol {
-        builder = builder.header("sec-websocket-protocol", protocol);
+    for (name, value) in &response_headers {
+        builder = builder.header(name, value);
     }
 
     let on_upgrade = hyper::upgrade::on(&mut request);
@@ -169,13 +167,11 @@ async fn proxy_websocket(
         if let Ok(upgraded) = on_upgrade.await {
             let _ = relay_websocket(
                 upgraded,
-                host,
                 target_host,
                 port,
                 path_and_query,
-                ingress_scheme,
-                ingress_port,
-                protocol,
+                request_headers,
+                response_headers,
             )
             .await;
         }
@@ -188,13 +184,11 @@ async fn proxy_websocket(
 
 async fn relay_websocket(
     upgraded: Upgraded,
-    host: String,
     target_host: String,
     port: u16,
     path_and_query: String,
-    ingress_scheme: String,
-    ingress_port: String,
-    protocol: Option<String>,
+    request_headers: Vec<(String, String)>,
+    _response_headers: Vec<(String, String)>,
 ) -> Result<()> {
     let downstream = WebSocketStream::from_raw_socket(
         hyper_util::rt::TokioIo::new(upgraded),
@@ -204,19 +198,12 @@ async fn relay_websocket(
     .await;
     let target = format!("ws://{target_host}:{port}{path_and_query}");
     let mut upstream_request = target.into_client_request()?;
-    upstream_request
-        .headers_mut()
-        .insert("x-forwarded-host", host.parse()?);
-    upstream_request
-        .headers_mut()
-        .insert("x-forwarded-proto", ingress_scheme.parse()?);
-    upstream_request
-        .headers_mut()
-        .insert("x-forwarded-port", ingress_port.parse()?);
-    if let Some(protocol) = &protocol {
+    for (name, value) in &request_headers {
+        let header_name: HeaderName = name.parse()?;
+        let header_value: HeaderValue = value.parse()?;
         upstream_request
             .headers_mut()
-            .insert("sec-websocket-protocol", protocol.parse()?);
+            .insert(header_name, header_value);
     }
     let (upstream, _) = connect_async(upstream_request).await?;
     tunnel_websockets(downstream, upstream).await
@@ -264,9 +251,9 @@ fn copy_headers(
         }
         request = request.header(name, value);
     }
-    request = request.header("x-forwarded-host", &plan.forwarded_host);
-    request = request.header("x-forwarded-proto", &plan.forwarded_proto);
-    request = request.header("x-forwarded-port", &plan.forwarded_port);
+    for (name, value) in &plan.set_request_headers {
+        request = request.header(name, value);
+    }
     request
 }
 
@@ -311,6 +298,26 @@ fn proxy_plan_from_value(value: Value) -> Result<ProxyPlan, StatusCode> {
         .and_then(Value::as_u64)
         .and_then(|raw| u16::try_from(raw).ok())
         .ok_or(StatusCode::BAD_GATEWAY)?;
+    let set_request_headers = value
+        .get("set_request_headers")
+        .and_then(Value::as_object)
+        .map(|headers| {
+            headers
+                .iter()
+                .filter_map(|(name, value)| value.as_str().map(|v| (name.clone(), v.to_string())))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let set_response_headers = value
+        .get("set_response_headers")
+        .and_then(Value::as_object)
+        .map(|headers| {
+            headers
+                .iter()
+                .filter_map(|(name, value)| value.as_str().map(|v| (name.clone(), v.to_string())))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Ok(ProxyPlan {
         proxy_kind: value
             .get("proxy_kind")
@@ -328,30 +335,18 @@ fn proxy_plan_from_value(value: Value) -> Result<ProxyPlan, StatusCode> {
             .and_then(Value::as_str)
             .ok_or(StatusCode::BAD_GATEWAY)?
             .to_string(),
-        forwarded_host: value
-            .get("forwarded_host")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        forwarded_proto: value
-            .get("forwarded_proto")
-            .and_then(Value::as_str)
-            .unwrap_or("http")
-            .to_string(),
-        forwarded_port: value
-            .get("forwarded_port")
-            .and_then(Value::as_str)
-            .unwrap_or("80")
-            .to_string(),
         drop_request_headers: value
             .get("drop_request_headers")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        websocket_protocol: value
-            .get("sec_websocket_protocol")
+        drop_response_headers: value
+            .get("drop_response_headers")
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
+            .unwrap_or("")
+            .to_string(),
+        set_request_headers,
+        set_response_headers,
     })
 }
 
