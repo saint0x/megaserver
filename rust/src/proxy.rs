@@ -36,6 +36,7 @@ struct ProxyPlan {
     upstream_path: String,
     forwarded_host: String,
     forwarded_proto: String,
+    forwarded_port: String,
     websocket_protocol: Option<String>,
 }
 
@@ -87,7 +88,7 @@ async fn proxy_request(
         .headers()
         .get("host")
         .and_then(|v| v.to_str().ok())
-        .map(|value| value.split(':').next().unwrap_or(value).to_string())
+        .map(ToOwned::to_owned)
         .ok_or(StatusCode::BAD_REQUEST)?;
     let plan = ingress_plan(&state, request.headers(), request.uri(), &host)?;
 
@@ -99,6 +100,7 @@ async fn proxy_request(
             plan.upstream_port,
             plan.upstream_path,
             plan.forwarded_proto,
+            plan.forwarded_port,
             plan.websocket_protocol,
         )
         .await;
@@ -122,6 +124,7 @@ async fn proxy_request(
         upstream,
         &plan.forwarded_host,
         &plan.forwarded_proto,
+        &plan.forwarded_port,
     );
     let response = upstream.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
@@ -146,6 +149,7 @@ async fn proxy_websocket(
     port: u16,
     path_and_query: String,
     ingress_scheme: String,
+    ingress_port: String,
     protocol: Option<String>,
 ) -> Result<Response<Body>, StatusCode> {
     let sec_key = request
@@ -175,6 +179,7 @@ async fn proxy_websocket(
                 port,
                 path_and_query,
                 ingress_scheme,
+                ingress_port,
                 protocol,
             )
             .await;
@@ -193,6 +198,7 @@ async fn relay_websocket(
     port: u16,
     path_and_query: String,
     ingress_scheme: String,
+    ingress_port: String,
     protocol: Option<String>,
 ) -> Result<()> {
     let downstream = WebSocketStream::from_raw_socket(
@@ -209,6 +215,9 @@ async fn relay_websocket(
     upstream_request
         .headers_mut()
         .insert("x-forwarded-proto", ingress_scheme.parse()?);
+    upstream_request
+        .headers_mut()
+        .insert("x-forwarded-port", ingress_port.parse()?);
     if let Some(protocol) = &protocol {
         upstream_request
             .headers_mut()
@@ -254,6 +263,7 @@ fn copy_headers(
     mut request: reqwest::RequestBuilder,
     host: &str,
     ingress_scheme: &str,
+    ingress_port: &str,
 ) -> reqwest::RequestBuilder {
     for (name, value) in headers {
         let lower = name.as_str();
@@ -273,6 +283,7 @@ fn copy_headers(
     }
     request = request.header("x-forwarded-host", host);
     request = request.header("x-forwarded-proto", ingress_scheme);
+    request = request.header("x-forwarded-port", ingress_port);
     request
 }
 
@@ -337,6 +348,11 @@ fn proxy_plan_from_value(value: Value) -> Result<ProxyPlan, StatusCode> {
             .get("forwarded_proto")
             .and_then(Value::as_str)
             .unwrap_or("http")
+            .to_string(),
+        forwarded_port: value
+            .get("forwarded_port")
+            .and_then(Value::as_str)
+            .unwrap_or("80")
             .to_string(),
         websocket_protocol: value
             .get("sec_websocket_protocol")

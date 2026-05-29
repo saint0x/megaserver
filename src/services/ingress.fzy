@@ -58,6 +58,51 @@ fn websocket_upgrade(upgrade: str, connection: str) -> i32 {
     return if str.contains(str.lower_ascii(connection), "upgrade") == 1 { 1 } else { 0 }
 }
 
+fn find_char(text: str, ch: str) -> i32 {
+    let mut idx = 0
+    while idx < str.len(text) {
+        if str.slice(text, idx, idx + 1) == ch {
+            return idx
+        }
+        idx += 1
+    }
+    return -1
+}
+
+fn default_forwarded_port(scheme: str) -> str {
+    return if scheme == "https" { "443" } else { "80" }
+}
+
+fn authority_host(authority: str) -> str {
+    if str.starts_with(authority, "[") == 1 {
+        let close = find_char(authority, "]")
+        if close > 1 {
+            return str.slice(authority, 1, close)
+        }
+        return authority
+    }
+    let colon = find_char(authority, ":")
+    if colon > 0 {
+        return str.slice(authority, 0, colon)
+    }
+    return authority
+}
+
+fn authority_port(authority: str, scheme: str) -> str {
+    if str.starts_with(authority, "[") == 1 {
+        let close = find_char(authority, "]")
+        if close >= 0 && close + 2 <= str.len(authority) && str.slice(authority, close + 1, close + 2) == ":" {
+            return str.slice(authority, close + 2, str.len(authority))
+        }
+        return default_forwarded_port(scheme)
+    }
+    let colon = find_char(authority, ":")
+    if colon > 0 && colon + 1 < str.len(authority) {
+        return str.slice(authority, colon + 1, str.len(authority))
+    }
+    return default_forwarded_port(scheme)
+}
+
 fn plan_json(
     host: str,
     path: str,
@@ -68,7 +113,9 @@ fn plan_json(
     websocket_protocol: str,
     home: str,
 ) -> str {
-    let lookup = lookup_result(host, path, query, home)
+    let lookup_host = authority_host(host)
+    let forwarded_port = authority_port(host, scheme)
+    let lookup = lookup_result(lookup_host, path, query, home)
     let parsed = json.parse(lookup)
     if json.get_str(parsed, "status") != "ok" {
         return map_lookup_error(json.get_str(parsed, "message"))
@@ -80,8 +127,9 @@ fn plan_json(
     discard map.set(payload, "upstream_host", json.str(json.get_str(parsed, "upstream_host")))
     discard map.set(payload, "upstream_port", json.raw(json.get_str(json.get(parsed, "upstream_port"), "raw")))
     discard map.set(payload, "upstream_path", json.str(json.get_str(parsed, "upstream_path")))
-    discard map.set(payload, "forwarded_host", json.str(host))
+    discard map.set(payload, "forwarded_host", json.str(lookup_host))
     discard map.set(payload, "forwarded_proto", json.str(scheme))
+    discard map.set(payload, "forwarded_port", json.str(forwarded_port))
     discard map.set(payload, "service", json.str(json.get_str(parsed, "service")))
     if websocket_protocol != "" {
         discard map.set(payload, "sec_websocket_protocol", json.str(websocket_protocol))
