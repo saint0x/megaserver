@@ -1,19 +1,33 @@
+use crate::manifest::NetworkPolicySection;
+
 pub const SANDBOX_SUBNET: &str = "10.42.0.0/24";
 pub const BRIDGE_NAME: &str = "megabr0";
 pub const BRIDGE_CIDR: &str = "10.42.0.254/24";
 pub const BRIDGE_GATEWAY: &str = "10.42.0.254";
 pub const FIREWALL_CHAIN: &str = "MEGASERVER-FORWARD";
 pub const INPUT_CHAIN: &str = "MEGASERVER-INPUT";
+pub const POLICY_CHAIN: &str = "MEGASERVER-POLICY";
+
+#[derive(Debug, Clone)]
+pub struct SandboxNetworkPolicyBinding {
+    pub service_name: String,
+    pub sandbox_ip: String,
+    pub policy: NetworkPolicySection,
+}
 
 #[cfg(target_os = "linux")]
 pub mod linux {
     use super::{
-        BRIDGE_CIDR, BRIDGE_GATEWAY, BRIDGE_NAME, FIREWALL_CHAIN, INPUT_CHAIN, SANDBOX_SUBNET,
+        BRIDGE_CIDR, BRIDGE_GATEWAY, BRIDGE_NAME, FIREWALL_CHAIN, INPUT_CHAIN, POLICY_CHAIN,
+        SANDBOX_SUBNET, SandboxNetworkPolicyBinding,
     };
+    use crate::manifest::{NetworkAccessPolicy, NetworkPolicyDefault, NetworkPolicySection};
     use anyhow::{Context, Result, bail};
+    use ipnet::IpNet;
     use std::collections::hash_map::DefaultHasher;
     use std::fs;
     use std::hash::{Hash, Hasher};
+    use std::net::IpAddr;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -35,6 +49,10 @@ pub mod linux {
 
     pub fn cleanup_sandbox_network(service_name: Option<&str>) -> Result<()> {
         HostNetworkManager::new(SystemRunner).cleanup_sandbox_network(service_name)
+    }
+
+    pub fn refresh_sandbox_policies(bindings: &[SandboxNetworkPolicyBinding]) -> Result<()> {
+        HostNetworkManager::new(SystemRunner).refresh_sandbox_policies(bindings)
     }
 
     pub fn sandbox_network_present(service_name: &str) -> Result<bool> {
@@ -178,6 +196,16 @@ pub mod linux {
             Ok(())
         }
 
+        fn refresh_sandbox_policies(&self, bindings: &[SandboxNetworkPolicyBinding]) -> Result<()> {
+            self.ensure_host_network()?;
+            self.iptables(&["-F", POLICY_CHAIN])?;
+            for rule in compile_policy_rules(bindings)? {
+                let args = rule.iter().map(String::as_str).collect::<Vec<_>>();
+                self.iptables(&args)?;
+            }
+            Ok(())
+        }
+
         fn ensure_host_network(&self) -> Result<()> {
             if self
                 .ip_allow_failure(&["link", "show", BRIDGE_NAME])
@@ -195,6 +223,7 @@ pub mod linux {
             let uplink = self.default_uplink_interface()?;
             self.ensure_iptables_chain(FIREWALL_CHAIN, "FORWARD")?;
             self.ensure_iptables_chain(INPUT_CHAIN, "INPUT")?;
+            self.ensure_iptables_chain(POLICY_CHAIN, FIREWALL_CHAIN)?;
             self.ensure_iptables_rule(
                 &["-C", "FORWARD", "-j", FIREWALL_CHAIN],
                 &["-A", "FORWARD", "-j", FIREWALL_CHAIN],
@@ -274,6 +303,10 @@ pub mod linux {
                     "-j",
                     "ACCEPT",
                 ],
+            )?;
+            self.ensure_iptables_rule(
+                &["-C", FIREWALL_CHAIN, "-j", POLICY_CHAIN],
+                &["-A", FIREWALL_CHAIN, "-j", POLICY_CHAIN],
             )?;
             self.ensure_iptables_rule(
                 &["-C", FIREWALL_CHAIN, "-d", SANDBOX_SUBNET, "-j", "DROP"],
@@ -409,6 +442,10 @@ pub mod linux {
             self.ensure_iptables_rule(&["-C", parent, "-j", chain], &["-A", parent, "-j", chain])
         }
 
+        fn iptables(&self, args: &[&str]) -> Result<String> {
+            self.runner.run("iptables", args)
+        }
+
         fn ip(&self, args: &[&str]) -> Result<String> {
             self.runner.run("ip", args)
         }
@@ -421,6 +458,193 @@ pub mod linux {
             let mut full_args = vec!["netns", "exec", netns];
             full_args.extend_from_slice(args);
             self.runner.run("ip", &full_args)
+        }
+    }
+
+    fn compile_policy_rules(bindings: &[SandboxNetworkPolicyBinding]) -> Result<Vec<Vec<String>>> {
+        let mut rules = Vec::new();
+        let subnet: IpNet = SANDBOX_SUBNET.parse().context("parse sandbox subnet")?;
+        let compiled = bindings
+            .iter()
+            .map(CompiledBinding::new)
+            .collect::<Result<Vec<_>>>()?;
+
+        for source in &compiled {
+            for target in &compiled {
+                if source.service_name == target.service_name {
+                    continue;
+                }
+                let allowed =
+                    policy_allows(&source.policy.egress, Some(&target.service_name), target.ip)
+                        && policy_allows(
+                            &target.policy.ingress,
+                            Some(&source.service_name),
+                            source.ip,
+                        );
+                rules.push(vec![
+                    "-A".to_string(),
+                    POLICY_CHAIN.to_string(),
+                    "-s".to_string(),
+                    source.ip_text.clone(),
+                    "-d".to_string(),
+                    target.ip_text.clone(),
+                    "-j".to_string(),
+                    if allowed { "ACCEPT" } else { "DROP" }.to_string(),
+                ]);
+            }
+        }
+
+        for target in &compiled {
+            for cidr in &target.policy.ingress.deny_cidrs {
+                let cidr = cidr
+                    .parse::<IpNet>()
+                    .with_context(|| format!("parse ingress CIDR `{cidr}`"))?;
+                rules.push(rule_for_destination(&cidr, &target.ip_text, "DROP"));
+            }
+            for cidr in &target.policy.ingress.allow_cidrs {
+                let cidr = cidr
+                    .parse::<IpNet>()
+                    .with_context(|| format!("parse ingress CIDR `{cidr}`"))?;
+                rules.push(rule_for_destination(&cidr, &target.ip_text, "ACCEPT"));
+            }
+            if target.policy.ingress.default == NetworkPolicyDefault::Deny {
+                rules.push(vec![
+                    "-A".to_string(),
+                    POLICY_CHAIN.to_string(),
+                    "-d".to_string(),
+                    target.ip_text.clone(),
+                    "-j".to_string(),
+                    "DROP".to_string(),
+                ]);
+            }
+        }
+
+        for source in &compiled {
+            for cidr in &source.policy.egress.deny_cidrs {
+                let cidr = cidr
+                    .parse::<IpNet>()
+                    .with_context(|| format!("parse egress CIDR `{cidr}`"))?;
+                rules.push(rule_for_source(&source.ip_text, &cidr, "DROP"));
+            }
+            for cidr in &source.policy.egress.allow_cidrs {
+                let cidr = cidr
+                    .parse::<IpNet>()
+                    .with_context(|| format!("parse egress CIDR `{cidr}`"))?;
+                rules.push(rule_for_source(&source.ip_text, &cidr, "ACCEPT"));
+            }
+            rules.push(vec![
+                "-A".to_string(),
+                POLICY_CHAIN.to_string(),
+                "-s".to_string(),
+                source.ip_text.clone(),
+                "!".to_string(),
+                "-d".to_string(),
+                subnet.to_string(),
+                "-j".to_string(),
+                match source.policy.egress.default {
+                    NetworkPolicyDefault::Allow => "ACCEPT",
+                    NetworkPolicyDefault::Deny => "DROP",
+                }
+                .to_string(),
+            ]);
+            rules.push(vec![
+                "-A".to_string(),
+                POLICY_CHAIN.to_string(),
+                "-s".to_string(),
+                source.ip_text.clone(),
+                "-d".to_string(),
+                subnet.to_string(),
+                "-j".to_string(),
+                "DROP".to_string(),
+            ]);
+        }
+
+        Ok(rules)
+    }
+
+    fn rule_for_source(source_ip: &str, cidr: &IpNet, action: &str) -> Vec<String> {
+        vec![
+            "-A".to_string(),
+            POLICY_CHAIN.to_string(),
+            "-s".to_string(),
+            source_ip.to_string(),
+            "-d".to_string(),
+            cidr.to_string(),
+            "-j".to_string(),
+            action.to_string(),
+        ]
+    }
+
+    fn rule_for_destination(source_cidr: &IpNet, target_ip: &str, action: &str) -> Vec<String> {
+        vec![
+            "-A".to_string(),
+            POLICY_CHAIN.to_string(),
+            "-s".to_string(),
+            source_cidr.to_string(),
+            "-d".to_string(),
+            target_ip.to_string(),
+            "-j".to_string(),
+            action.to_string(),
+        ]
+    }
+
+    fn policy_allows(
+        policy: &NetworkAccessPolicy,
+        service_name: Option<&str>,
+        peer_ip: IpAddr,
+    ) -> bool {
+        if policy
+            .deny_services
+            .iter()
+            .any(|candidate| Some(candidate.as_str()) == service_name)
+        {
+            return false;
+        }
+        if policy
+            .deny_cidrs
+            .iter()
+            .filter_map(|cidr| cidr.parse::<IpNet>().ok())
+            .any(|cidr| cidr.contains(&peer_ip))
+        {
+            return false;
+        }
+        if policy
+            .allow_services
+            .iter()
+            .any(|candidate| Some(candidate.as_str()) == service_name)
+        {
+            return true;
+        }
+        if policy
+            .allow_cidrs
+            .iter()
+            .filter_map(|cidr| cidr.parse::<IpNet>().ok())
+            .any(|cidr| cidr.contains(&peer_ip))
+        {
+            return true;
+        }
+        matches!(policy.default, NetworkPolicyDefault::Allow)
+    }
+
+    struct CompiledBinding<'a> {
+        service_name: &'a str,
+        ip: IpAddr,
+        ip_text: String,
+        policy: &'a NetworkPolicySection,
+    }
+
+    impl<'a> CompiledBinding<'a> {
+        fn new(binding: &'a SandboxNetworkPolicyBinding) -> Result<Self> {
+            let ip: IpAddr = binding
+                .sandbox_ip
+                .parse()
+                .with_context(|| format!("parse sandbox ip for {}", binding.service_name))?;
+            Ok(Self {
+                service_name: &binding.service_name,
+                ip,
+                ip_text: binding.sandbox_ip.clone(),
+                policy: &binding.policy,
+            })
         }
     }
 
@@ -559,6 +783,10 @@ pub mod linux {
                     Err("missing established rule"),
                 )
                 .with_output(
+                    "iptables -C MEGASERVER-FORWARD -j MEGASERVER-POLICY",
+                    Err("missing policy jump"),
+                )
+                .with_output(
                     "iptables -C MEGASERVER-FORWARD -d 10.42.0.0/24 -j DROP",
                     Err("missing drop rule"),
                 )
@@ -599,12 +827,15 @@ pub mod linux {
             assert!(calls.contains(
                 &"iptables -A MEGASERVER-FORWARD -i megabr0 -o megabr0 -j ACCEPT".to_string()
             ));
-            assert!(
-                calls.contains(&"iptables -A MEGASERVER-FORWARD -i megabr0 -j ACCEPT".to_string())
-            );
+            assert!(calls.contains(
+                &"iptables -A MEGASERVER-FORWARD -i megabr0 -j ACCEPT".to_string()
+            ));
             assert!(calls.contains(
                 &"iptables -A MEGASERVER-FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT".to_string()
             ));
+            assert!(
+                calls.contains(&"iptables -A MEGASERVER-FORWARD -j MEGASERVER-POLICY".to_string())
+            );
             assert!(
                 calls.contains(
                     &"iptables -A MEGASERVER-FORWARD -d 10.42.0.0/24 -j DROP".to_string()
@@ -659,6 +890,7 @@ pub mod linux {
                     "iptables -C MEGASERVER-FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
                     Ok(""),
                 )
+                .with_output("iptables -C MEGASERVER-FORWARD -j MEGASERVER-POLICY", Ok(""))
                 .with_output(
                     "iptables -C MEGASERVER-FORWARD -d 10.42.0.0/24 -j DROP",
                     Ok(""),
@@ -710,6 +942,68 @@ pub mod linux {
             assert!(calls.contains(&format!(
                 "ip netns exec {netns} ip route replace default via 10.42.0.254"
             )));
+        }
+
+        #[test]
+        fn compiles_service_network_policies() {
+            let rules = compile_policy_rules(&[
+                SandboxNetworkPolicyBinding {
+                    service_name: "frontend".to_string(),
+                    sandbox_ip: "10.42.0.10".to_string(),
+                    policy: NetworkPolicySection::default(),
+                },
+                SandboxNetworkPolicyBinding {
+                    service_name: "backend".to_string(),
+                    sandbox_ip: "10.42.0.11".to_string(),
+                    policy: NetworkPolicySection {
+                        ingress: NetworkAccessPolicy {
+                            default: NetworkPolicyDefault::Deny,
+                            allow_services: vec!["frontend".to_string()],
+                            allow_cidrs: vec![],
+                            deny_services: vec![],
+                            deny_cidrs: vec![],
+                        },
+                        egress: NetworkAccessPolicy::default(),
+                    },
+                },
+                SandboxNetworkPolicyBinding {
+                    service_name: "worker".to_string(),
+                    sandbox_ip: "10.42.0.12".to_string(),
+                    policy: NetworkPolicySection {
+                        ingress: NetworkAccessPolicy::default(),
+                        egress: NetworkAccessPolicy {
+                            default: NetworkPolicyDefault::Deny,
+                            allow_services: vec![],
+                            allow_cidrs: vec!["8.8.8.8/32".to_string()],
+                            deny_services: vec!["backend".to_string()],
+                            deny_cidrs: vec!["169.254.169.254/32".to_string()],
+                        },
+                    },
+                },
+            ])
+            .unwrap()
+            .into_iter()
+            .map(|rule| rule.join(" "))
+            .collect::<Vec<_>>();
+
+            assert!(rules.contains(
+                &"-A MEGASERVER-POLICY -s 10.42.0.10 -d 10.42.0.11 -j ACCEPT".to_string()
+            ));
+            assert!(
+                rules.contains(
+                    &"-A MEGASERVER-POLICY -s 10.42.0.12 -d 10.42.0.11 -j DROP".to_string()
+                )
+            );
+            assert!(rules.contains(
+                &"-A MEGASERVER-POLICY -s 10.42.0.12 -d 169.254.169.254/32 -j DROP".to_string()
+            ));
+            assert!(rules.contains(
+                &"-A MEGASERVER-POLICY -s 10.42.0.12 -d 8.8.8.8/32 -j ACCEPT".to_string()
+            ));
+            assert!(rules.contains(
+                &"-A MEGASERVER-POLICY -s 10.42.0.12 ! -d 10.42.0.0/24 -j DROP".to_string()
+            ));
+            assert!(rules.contains(&"-A MEGASERVER-POLICY -d 10.42.0.11 -j DROP".to_string()));
         }
     }
 }

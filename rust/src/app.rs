@@ -249,6 +249,45 @@ fn refresh_private_hosts(paths: &StatePaths, conn: &rusqlite::Connection) -> Res
     Ok(())
 }
 
+pub(crate) fn refresh_linux_network_policies(
+    paths: &StatePaths,
+    conn: &rusqlite::Connection,
+) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (paths, conn);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = paths;
+        if !crate::network::linux::isolation_supported() {
+            return Ok(());
+        }
+
+        let mut bindings = Vec::new();
+        for sandbox in state::list_sandboxes(conn)? {
+            if sandbox.runtime_kind != "linux-namespace" || sandbox.status == "stopped" {
+                continue;
+            }
+            let Some(ip_address) = sandbox.ip_address.clone() else {
+                continue;
+            };
+            let Some(service) = state::service_by_name(conn, &sandbox.service_name)? else {
+                continue;
+            };
+            let manifest = manifest_from_record(&service)?;
+            bindings.push(crate::network::SandboxNetworkPolicyBinding {
+                service_name: sandbox.service_name,
+                sandbox_ip: ip_address,
+                policy: manifest.network.policy,
+            });
+        }
+        crate::network::linux::refresh_sandbox_policies(&bindings)
+    }
+}
+
 fn service_runtime_host(runtime_kind: &str, sandbox_ip: Option<&str>) -> String {
     if runtime_kind == "linux-namespace" {
         sandbox_ip.unwrap_or("127.0.0.1").to_string()
@@ -367,6 +406,31 @@ pub fn start_only(paths: &StatePaths, service: &str) -> Result<()> {
             cgroup_path: spawned.cgroup_path.as_deref(),
         },
     )?;
+    if let Err(err) = refresh_linux_network_policies(paths, &conn) {
+        let _ = runtime::stop_pid(spawned.pid, Duration::from_secs(2));
+        let _ = crate::sandbox::cleanup_sandbox(&crate::sandbox::SandboxLaunchMetadata {
+            service_name: Some(service.to_string()),
+            runtime_kind: spawned.runtime_kind.clone(),
+            isolation_mode: spawned.isolation_mode.clone(),
+            cgroup_path: spawned.cgroup_path.clone(),
+        });
+        let _ = state::update_service_status(&conn, service, "failed", None);
+        let _ = state::upsert_sandbox(
+            &conn,
+            state::SandboxUpsert {
+                service_name: service,
+                sandbox_id: &sandbox_id,
+                hostname: &sandbox_hostname,
+                ip_address: Some(&sandbox_ip_text),
+                runtime_kind: &spawned.runtime_kind,
+                isolation_mode: &spawned.isolation_mode,
+                status: "stopped",
+                pid: None,
+                cgroup_path: None,
+            },
+        );
+        return Err(err.context("apply sandbox network policy"));
+    }
     state::emit_event(
         &conn,
         Some(service),
@@ -490,6 +554,7 @@ pub fn stop_only(paths: &StatePaths, service: &str) -> Result<()> {
             },
         )?;
     }
+    refresh_linux_network_policies(paths, &conn)?;
     refresh_private_hosts(paths, &conn)?;
     dns::stop_if_idle(paths)?;
     state::emit_event(
@@ -533,6 +598,7 @@ pub fn destroy_only(paths: &StatePaths, service: &str) -> Result<()> {
     )?;
     state::delete_sandbox(&conn, service)?;
     state::delete_service(&conn, service)?;
+    refresh_linux_network_policies(paths, &conn)?;
     refresh_private_hosts(paths, &conn)?;
     dns::stop_if_idle(paths)?;
     let runtime_dir = paths.service_runtime_dir(service);
@@ -1475,6 +1541,101 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn linux_network_policy_restricts_service_connectivity() {
+        #[cfg(not(target_os = "linux"))]
+        return;
+
+        #[cfg(target_os = "linux")]
+        if !crate::network::linux::isolation_supported() {
+            return;
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("linux-policy-home"))).unwrap();
+        state::init(&paths).unwrap();
+
+        let frontend_app =
+            write_test_service_app(temp.path(), "frontend-service", 18082, "frontend.local");
+        let backend_app = write_test_service_app_with_network(
+            temp.path(),
+            "backend-service",
+            18083,
+            "backend.local",
+            "  policy:\n    ingress:\n      default: deny\n      allow_services:\n        - frontend-service\n        - worker-service\n",
+        );
+        let worker_app = write_test_service_app_with_network(
+            temp.path(),
+            "worker-service",
+            18084,
+            "worker.local",
+            "  policy:\n    egress:\n      default: deny\n      allow_services:\n        - backend-service\n",
+        );
+        let blocked_app =
+            write_test_service_app(temp.path(), "blocked-service", 18085, "blocked.local");
+
+        deploy_and_start_only(&paths, &frontend_app).unwrap();
+        deploy_and_start_only(&paths, &backend_app).unwrap();
+        deploy_and_start_only(&paths, &worker_app).unwrap();
+        deploy_and_start_only(&paths, &blocked_app).unwrap();
+
+        shell_only(
+            &paths,
+            "frontend-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "import urllib.request; body = urllib.request.urlopen('http://backend-service:18083/health', timeout=5).read().decode(); assert body == 'ok\\n'".to_string(),
+            ],
+        )
+        .unwrap();
+
+        shell_only(
+            &paths,
+            "worker-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "import urllib.request; body = urllib.request.urlopen('http://backend-service:18083/health', timeout=5).read().decode(); assert body == 'ok\\n'".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let denied = shell_only(
+            &paths,
+            "worker-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "import urllib.request\ntry:\n    urllib.request.urlopen('http://frontend-service:18082/health', timeout=3)\nexcept Exception:\n    raise SystemExit(0)\nraise SystemExit(1)".to_string(),
+            ],
+        );
+        assert!(
+            denied.is_ok(),
+            "worker egress policy should reject frontend"
+        );
+
+        let ingress_denied = shell_only(
+            &paths,
+            "blocked-service",
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "import urllib.request\ntry:\n    urllib.request.urlopen('http://backend-service:18083/health', timeout=3)\nexcept Exception:\n    raise SystemExit(0)\nraise SystemExit(1)".to_string(),
+            ],
+        );
+        assert!(
+            ingress_denied.is_ok(),
+            "backend ingress policy should reject blocked-service"
+        );
+
+        destroy_only(&paths, "blocked-service").unwrap();
+        destroy_only(&paths, "worker-service").unwrap();
+        destroy_only(&paths, "backend-service").unwrap();
+        destroy_only(&paths, "frontend-service").unwrap();
+    }
+
+    #[test]
     fn linux_shell_enters_sandbox_rootfs_and_volume_mounts() {
         if !crate::network::linux::isolation_supported() {
             return;
@@ -1640,7 +1801,17 @@ mod tests {
         port: u16,
         domain: &str,
     ) -> PathBuf {
-        write_test_service_app_with_volumes(root, name, port, domain, &[])
+        write_test_service_app_with_network(root, name, port, domain, "")
+    }
+
+    fn write_test_service_app_with_network(
+        root: &std::path::Path,
+        name: &str,
+        port: u16,
+        domain: &str,
+        network_extra_yaml: &str,
+    ) -> PathBuf {
+        write_test_service_app_with_options(root, name, port, domain, network_extra_yaml, &[])
     }
 
     fn write_test_service_app_with_volumes(
@@ -1648,6 +1819,17 @@ mod tests {
         name: &str,
         port: u16,
         domain: &str,
+        volumes: &[&str],
+    ) -> PathBuf {
+        write_test_service_app_with_options(root, name, port, domain, "", volumes)
+    }
+
+    fn write_test_service_app_with_options(
+        root: &std::path::Path,
+        name: &str,
+        port: u16,
+        domain: &str,
+        network_extra_yaml: &str,
         volumes: &[&str],
     ) -> PathBuf {
         let app_dir = root.join(name);
@@ -1681,7 +1863,8 @@ HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
         fs::write(
             app_dir.join("megaserver.yaml"),
             format!(
-                "name: {name}\nruntime:\n  command:\n    - python3\n    - server.py\nnetwork:\n  port: {port}\nresources:\n  memory: 64mb\n  cpu: \"1\"\nvolumes:\n{volumes}routes:\n  - {domain}\nhealth:\n  path: /health\n",
+                "name: {name}\nruntime:\n  command:\n    - python3\n    - server.py\nnetwork:\n  port: {port}\n{network_extra_yaml}resources:\n  memory: 64mb\n  cpu: \"1\"\nvolumes:\n{volumes}routes:\n  - {domain}\nhealth:\n  path: /health\n",
+                network_extra_yaml = network_extra_yaml,
                 volumes = if volumes.is_empty() {
                     "  []\n".to_string()
                 } else {

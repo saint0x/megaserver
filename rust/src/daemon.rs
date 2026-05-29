@@ -151,6 +151,8 @@ async fn reconcile_once(state: &Arc<DaemonState>) -> Result<()> {
             )?;
         }
     }
+    let conn = state::open(&state.paths)?;
+    crate::app::refresh_linux_network_policies(&state.paths, &conn)?;
     crate::dns::stop_if_idle(&state.paths)?;
     Ok(())
 }
