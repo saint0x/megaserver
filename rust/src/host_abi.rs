@@ -36,16 +36,16 @@ fn set_last_error(message: &str) {
     }
 }
 
-fn control_output_path() -> PathBuf {
-    env::var_os("MEGASERVER_FZY_CONTROL_OUTPUT")
+fn host_input_path() -> PathBuf {
+    env::var_os("MEGASERVER_FZY_HOST_INPUT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/tmp/megaserver.fzy.control.output.json"))
+        .unwrap_or_else(|| PathBuf::from("/var/tmp/megaserver.fzy.host.input.json"))
 }
 
-fn control_input_path() -> PathBuf {
-    env::var_os("MEGASERVER_FZY_CONTROL_INPUT")
+fn host_output_path() -> PathBuf {
+    env::var_os("MEGASERVER_FZY_HOST_OUTPUT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/tmp/megaserver.fzy.control.input.json"))
+        .unwrap_or_else(|| PathBuf::from("/var/tmp/megaserver.fzy.host.output.json"))
 }
 
 fn resolve_paths(request: &Value) -> anyhow::Result<StatePaths> {
@@ -284,6 +284,63 @@ fn dispatch_http_value(request: &Value) -> anyhow::Result<Value> {
     }
 }
 
+fn service_target_host(sandbox: Option<&crate::model::SandboxRecord>) -> &str {
+    match sandbox {
+        Some(sandbox) if sandbox.runtime_kind == "linux-namespace" => {
+            sandbox.ip_address.as_deref().unwrap_or("127.0.0.1")
+        }
+        _ => "127.0.0.1",
+    }
+}
+
+fn ingress_resolve_value(paths: &StatePaths, request: &Value) -> anyhow::Result<Value> {
+    let host = request
+        .get("host")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing host"))?;
+    let path = request
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+    let query = request
+        .get("query")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+
+    let conn = state::open(paths)?;
+    let route = state::list_routes(&conn, None)?
+        .into_iter()
+        .find(|route| route.domain == host)
+        .ok_or_else(|| anyhow::anyhow!("route not found for host `{host}`"))?;
+    let service = state::service_by_name(&conn, &route.service_name)?
+        .ok_or_else(|| anyhow::anyhow!("unknown service `{}`", route.service_name))?;
+    if service.status != "healthy" && service.status != "degraded" {
+        anyhow::bail!("service unavailable");
+    }
+    let sandbox = state::sandbox_by_service(&conn, &route.service_name)?;
+    let upstream_host = service_target_host(sandbox.as_ref()).to_string();
+    let upstream_port = route
+        .port
+        .ok_or_else(|| anyhow::anyhow!("missing route port"))?;
+    let upstream_path = if path == "/_megaserver/signed" {
+        let secret = state::secret_value(&conn, &route.service_name, "MEGASERVER_SIGNING_KEY")?
+            .ok_or_else(|| anyhow::anyhow!("signed links are not enabled for this service"))?;
+        crate::ingress::resolve_signed_target(&secret, host, &route.service_name, query)?
+    } else if let Some(query) = query {
+        format!("{path}?{query}")
+    } else {
+        path.to_string()
+    };
+    Ok(json!({
+        "status": "ok",
+        "service": route.service_name,
+        "service_status": service.status,
+        "upstream_host": upstream_host,
+        "upstream_port": upstream_port,
+        "upstream_path": upstream_path
+    }))
+}
+
 fn dispatch_value(request: &Value) -> anyhow::Result<Value> {
     if request.get("method").is_some() {
         return dispatch_http_value(request);
@@ -492,6 +549,7 @@ fn dispatch_value(request: &Value) -> anyhow::Result<Value> {
             app::shell_only(&paths, service, &command)?;
             Ok(json!({"status":"ok","service":service,"action":"shell"}))
         }
+        "ingress_resolve" => ingress_resolve_value(&paths, request),
         other => Err(anyhow::anyhow!("unknown action `{other}`")),
     }
 }
@@ -507,12 +565,12 @@ pub extern "C" fn megaserver_host_last_error_message() -> *const c_char {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn megaserver_host_dispatch() -> i32 {
-    let request_text = match std::fs::read_to_string(control_input_path()) {
+    let request_text = match std::fs::read_to_string(host_input_path()) {
         Ok(text) => text,
         Err(err) => {
             set_last_error(&format!("read control input failed: {err}"));
             let _ = std::fs::write(
-                control_output_path(),
+                host_output_path(),
                 json!({"status":"error","message":format!("read control input failed: {err}"),"control_plane":"rust-host"}).to_string(),
             );
             return 21;
@@ -524,7 +582,7 @@ pub extern "C" fn megaserver_host_dispatch() -> i32 {
         Err(err) => {
             set_last_error(&format!("invalid control request json: {err}"));
             let _ = std::fs::write(
-                control_output_path(),
+                host_output_path(),
                 json!({"status":"error","message":format!("invalid control request json: {err}"),"control_plane":"rust-host"}).to_string(),
             );
             return 22;
@@ -533,7 +591,7 @@ pub extern "C" fn megaserver_host_dispatch() -> i32 {
 
     match dispatch_value(&request) {
         Ok(value) => {
-            if let Err(err) = std::fs::write(control_output_path(), value.to_string()) {
+            if let Err(err) = std::fs::write(host_output_path(), value.to_string()) {
                 set_last_error(&format!("write control output failed: {err}"));
                 return 5;
             }
@@ -542,7 +600,7 @@ pub extern "C" fn megaserver_host_dispatch() -> i32 {
         Err(err) => {
             set_last_error(&err.to_string());
             let _ = std::fs::write(
-                control_output_path(),
+                host_output_path(),
                 json!({"status":"error","message":err.to_string(),"control_plane":"rust-host"})
                     .to_string(),
             );

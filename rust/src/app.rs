@@ -1018,6 +1018,7 @@ mod tests {
     use crate::controlplane;
     use crate::state;
     use crate::test_support::TEST_LOCK;
+    #[cfg(target_os = "linux")]
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
@@ -1143,11 +1144,47 @@ mod tests {
     }
 
     #[test]
-    fn linux_private_network_supports_service_to_service_reachability() {
-        #[cfg(not(target_os = "linux"))]
-        return;
+    fn ingress_control_plane_preserves_plain_health_path() {
+        let _guard = crate::test_support::INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::test_support::cleanup_fzy_io_files();
+        let temp = TempDir::new().unwrap();
+        let paths = StatePaths::resolve(Some(temp.path().join("ingress-home"))).unwrap();
+        state::init(&paths).unwrap();
 
-        #[cfg(target_os = "linux")]
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        cleanup_hello_service(&repo_root);
+        let example = repo_root.join("examples/hello-service");
+
+        deploy_and_start_only(&paths, &example).unwrap();
+
+        let plan = controlplane::dispatch_ingress_raw(
+            &paths.home,
+            "hello.local",
+            "/health",
+            None,
+            "http",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(plan["status"].as_str(), Some("ok"));
+        assert_eq!(plan["upstream_path"].as_str(), Some("/health"));
+
+        destroy_only(&paths, "hello-service").unwrap();
+        cleanup_hello_service(&repo_root);
+        crate::test_support::cleanup_fzy_io_files();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_private_network_supports_service_to_service_reachability() {
         if !crate::network::linux::isolation_supported() {
             return;
         }
@@ -1184,12 +1221,9 @@ mod tests {
         destroy_only(&paths, "alpha-service").unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_shell_enters_sandbox_rootfs_and_volume_mounts() {
-        #[cfg(not(target_os = "linux"))]
-        return;
-
-        #[cfg(target_os = "linux")]
         if !crate::network::linux::isolation_supported() {
             return;
         }
@@ -1224,12 +1258,9 @@ mod tests {
         destroy_only(&paths, "hello-service").unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_snapshot_and_rollback_restore_active_sandbox_volume_state() {
-        #[cfg(not(target_os = "linux"))]
-        return;
-
-        #[cfg(target_os = "linux")]
         if !crate::network::linux::isolation_supported() {
             return;
         }
@@ -1298,7 +1329,6 @@ mod tests {
 
         destroy_only(&paths, "hello-service").unwrap();
     }
-
     fn write_test_service_app(
         root: &std::path::Path,
         name: &str,

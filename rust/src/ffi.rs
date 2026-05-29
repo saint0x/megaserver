@@ -99,13 +99,18 @@ pub fn dispatch_control(payload: &Value) -> Result<Value> {
     with_fzy_runtime(|| {
         let control_input = scratch_path("megaserver.fzy.control.input.json");
         let control_output = scratch_path("megaserver.fzy.control.output.json");
+        let host_input = scratch_path("megaserver.fzy.host.input.json");
+        let host_output = scratch_path("megaserver.fzy.host.output.json");
         fs::create_dir_all(control_input.parent().expect("control input parent"))?;
         unsafe {
             env::set_var("MEGASERVER_FZY_CONTROL_INPUT", &control_input);
             env::set_var("MEGASERVER_FZY_CONTROL_OUTPUT", &control_output);
+            env::set_var("MEGASERVER_FZY_HOST_INPUT", &host_input);
+            env::set_var("MEGASERVER_FZY_HOST_OUTPUT", &host_output);
         }
         fs::write(&control_input, input).context("write Fzy control input")?;
         let _ = fs::remove_file(&control_output);
+        let _ = fs::remove_file(&host_output);
         let code = unsafe { megaserver_fzy_dispatch_control() };
         let output = fs::read_to_string(&control_output).unwrap_or_default();
         if code != 0 && output.is_empty() {

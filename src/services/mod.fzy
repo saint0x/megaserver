@@ -1,4 +1,5 @@
 mod control;
+mod ingress;
 mod http;
 mod planner;
 mod web;

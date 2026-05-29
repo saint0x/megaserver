@@ -15,6 +15,10 @@ pub(crate) fn cleanup_fzy_io_files() {
         "/tmp/megaserver.fzy.control.output.json",
         "/tmp/megaserver.fzy.host.input.json",
         "/tmp/megaserver.fzy.host.output.json",
+        "/var/tmp/megaserver.fzy.control.input.json",
+        "/var/tmp/megaserver.fzy.control.output.json",
+        "/var/tmp/megaserver.fzy.host.input.json",
+        "/var/tmp/megaserver.fzy.host.output.json",
     ] {
         let target = Path::new(path);
         if target.exists() {

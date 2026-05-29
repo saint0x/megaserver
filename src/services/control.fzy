@@ -16,6 +16,18 @@ fn normalized_request(raw: str) -> str {
             model.control.authorization(raw),
         )
     }
+    if kind == "ingress" {
+        return services.ingress.plan_json(
+            model.control.ingress_host(raw),
+            model.control.ingress_path(raw),
+            model.control.ingress_query(raw),
+            model.control.ingress_scheme(raw),
+            model.control.upgrade(raw),
+            model.control.connection(raw),
+            model.control.websocket_protocol(raw),
+            model.control.home(raw),
+        )
+    }
     return model.control.error_payload("control request must contain either `action` or `method`+`path`")
 }
 
@@ -59,6 +71,15 @@ fn dispatch_host() -> i32 {
         )
         ensures true
         return code
+    }
+    if kind == "ingress" {
+        let normalized = normalized_request(raw)
+        discard fs.write_file(model.control.output_path(), normalized)
+        if normalization_failed(normalized) == 1 {
+            return 22
+        }
+        ensures true
+        return 0
     }
 
     let normalized = normalized_request(raw)

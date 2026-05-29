@@ -421,9 +421,6 @@ mod tests {
         crate::test_support::cleanup_fzy_io_files();
     }
 
-    // The separate-process Fozzy TLS scenario is the authoritative coverage for this path.
-    // This in-process variant reuses the file-backed FZY host ABI and can flake after another
-    // daemon test even when the real daemon/TLS path is healthy.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "covered deterministically by tests/megaserver.daemon.tls.pass.fozzy.json"]
     async fn daemon_serves_https_for_api_and_ingress() {
@@ -555,6 +552,7 @@ mod tests {
         crate::test_support::cleanup_fzy_io_files();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_cleans_up_crashed_linux_sandbox_resources() {
         if !linux_isolation_supported() {

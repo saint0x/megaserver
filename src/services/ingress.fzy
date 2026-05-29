@@ -1,0 +1,91 @@
+use core.fs;
+
+fn error_json(status: i32, code: str, message: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("error"))
+    discard map.set(payload, "http_status", json.raw(str.from_i32(status)))
+    discard map.set(payload, "code", json.str(code))
+    discard map.set(payload, "message", json.str(message))
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    return json.object(payload)
+}
+
+fn map_lookup_error(message: str) -> str {
+    let lower = str.lower_ascii(message)
+    if str.contains(lower, "route not found") == 1 {
+        return error_json(404, "route_not_found", message)
+    }
+    if str.contains(lower, "expired") == 1 || str.contains(lower, "signature") == 1 || str.contains(lower, "missing signed-link") == 1 || str.contains(lower, "signed links are not enabled") == 1 {
+        return error_json(401, "signed_link_invalid", message)
+    }
+    if str.contains(lower, "service unavailable") == 1 {
+        return error_json(503, "service_unavailable", message)
+    }
+    if str.contains(lower, "unknown service") == 1 || str.contains(lower, "missing route port") == 1 {
+        return error_json(502, "bad_gateway", message)
+    }
+    return error_json(500, "ingress_lookup_failed", message)
+}
+
+fn lookup_action_json(host: str, path: str, query: str, home: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "action", json.str("ingress_resolve"))
+    discard map.set(payload, "home", json.str(home))
+    discard map.set(payload, "host", json.str(host))
+    discard map.set(payload, "path", json.str(path))
+    if query != "" {
+        discard map.set(payload, "query", json.str(query))
+    }
+    return json.object(payload)
+}
+
+fn lookup_result(host: str, path: str, query: str, home: str) -> str {
+    let code = api.ffi.host_dispatch(lookup_action_json(host, path, query, home))
+    let output = fs.read_file(model.control.host_output_path())
+    if output == "" {
+        if code != 0 {
+            return model.control.error_payload("host ingress lookup failed")
+        }
+        return model.control.error_payload("host ingress lookup output missing")
+    }
+    return output
+}
+
+fn websocket_upgrade(upgrade: str, connection: str) -> i32 {
+    if str.lower_ascii(str.trim(upgrade)) != "websocket" {
+        return 0
+    }
+    return if str.contains(str.lower_ascii(connection), "upgrade") == 1 { 1 } else { 0 }
+}
+
+fn plan_json(
+    host: str,
+    path: str,
+    query: str,
+    scheme: str,
+    upgrade: str,
+    connection: str,
+    websocket_protocol: str,
+    home: str,
+) -> str {
+    let lookup = lookup_result(host, path, query, home)
+    let parsed = json.parse(lookup)
+    if json.get_str(parsed, "status") != "ok" {
+        return map_lookup_error(json.get_str(parsed, "message"))
+    }
+
+    let payload = map.new()
+    discard map.set(payload, "status", json.str("ok"))
+    discard map.set(payload, "proxy_kind", if websocket_upgrade(upgrade, connection) == 1 { json.str("websocket") } else { json.str("http") })
+    discard map.set(payload, "upstream_host", json.str(json.get_str(parsed, "upstream_host")))
+    discard map.set(payload, "upstream_port", json.raw(json.get_str(json.get(parsed, "upstream_port"), "raw")))
+    discard map.set(payload, "upstream_path", json.str(json.get_str(parsed, "upstream_path")))
+    discard map.set(payload, "forwarded_host", json.str(host))
+    discard map.set(payload, "forwarded_proto", json.str(scheme))
+    discard map.set(payload, "service", json.str(json.get_str(parsed, "service")))
+    if websocket_protocol != "" {
+        discard map.set(payload, "sec_websocket_protocol", json.str(websocket_protocol))
+    }
+    discard map.set(payload, "control_plane", json.str("fzy"))
+    return json.object(payload)
+}

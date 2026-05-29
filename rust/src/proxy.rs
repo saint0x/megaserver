@@ -1,4 +1,5 @@
-use crate::state::{self, StatePaths};
+use crate::controlplane;
+use crate::state::StatePaths;
 use crate::tls;
 use anyhow::{Context, Result};
 use axum::{
@@ -13,6 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::upgrade::Upgraded;
 use reqwest::Client;
+use serde_json::Value;
 use sha1::{Digest, Sha1};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -27,13 +29,14 @@ struct ProxyState {
     ingress_scheme: String,
 }
 
-fn service_target_host(sandbox: Option<&crate::model::SandboxRecord>) -> &str {
-    match sandbox {
-        Some(sandbox) if sandbox.runtime_kind == "linux-namespace" => {
-            sandbox.ip_address.as_deref().unwrap_or("127.0.0.1")
-        }
-        _ => "127.0.0.1",
-    }
+struct ProxyPlan {
+    proxy_kind: String,
+    upstream_host: String,
+    upstream_port: u16,
+    upstream_path: String,
+    forwarded_host: String,
+    forwarded_proto: String,
+    websocket_protocol: Option<String>,
 }
 
 pub async fn serve(
@@ -86,35 +89,17 @@ async fn proxy_request(
         .and_then(|v| v.to_str().ok())
         .map(|value| value.split(':').next().unwrap_or(value).to_string())
         .ok_or(StatusCode::BAD_REQUEST)?;
+    let plan = ingress_plan(&state, request.headers(), request.uri(), &host)?;
 
-    let conn = state::open(&state.paths).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let routes = state::list_routes(&conn, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let route = routes
-        .into_iter()
-        .find(|route| route.domain == host)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let service = state::service_by_name(&conn, &route.service_name)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::BAD_GATEWAY)?;
-    let sandbox = state::sandbox_by_service(&conn, &route.service_name)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if service.status != "healthy" && service.status != "degraded" {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    let port = route.port.ok_or(StatusCode::BAD_GATEWAY)?;
-    let target_host = service_target_host(sandbox.as_ref());
-
-    let is_websocket = is_websocket_upgrade(request.headers());
-    if is_websocket {
-        let path_and_query = upstream_path(&conn, &route, &service, &host, request.uri())
-            .map_err(map_ingress_error)?;
+    if plan.proxy_kind == "websocket" {
         return proxy_websocket(
-            state.clone(),
             request,
-            host,
-            target_host.to_string(),
-            port,
-            path_and_query,
+            plan.forwarded_host,
+            plan.upstream_host,
+            plan.upstream_port,
+            plan.upstream_path,
+            plan.forwarded_proto,
+            plan.websocket_protocol,
         )
         .await;
     }
@@ -125,13 +110,19 @@ async fn proxy_request(
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?
         .to_bytes();
-    let path_and_query =
-        upstream_path(&conn, &route, &service, &host, &parts.uri).map_err(map_ingress_error)?;
-    let target = format!("http://{target_host}:{port}{path_and_query}");
+    let target = format!(
+        "http://{}:{}{}",
+        plan.upstream_host, plan.upstream_port, plan.upstream_path
+    );
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut upstream = state.client.request(method, target).body(body_bytes);
-    upstream = copy_headers(&parts.headers, upstream, &host, &state.ingress_scheme);
+    upstream = copy_headers(
+        &parts.headers,
+        upstream,
+        &plan.forwarded_host,
+        &plan.forwarded_proto,
+    );
     let response = upstream.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let status = response.status();
@@ -149,12 +140,13 @@ async fn proxy_request(
 }
 
 async fn proxy_websocket(
-    state: Arc<ProxyState>,
     mut request: Request,
     host: String,
     target_host: String,
     port: u16,
     path_and_query: String,
+    ingress_scheme: String,
+    protocol: Option<String>,
 ) -> Result<Response<Body>, StatusCode> {
     let sec_key = request
         .headers()
@@ -163,11 +155,6 @@ async fn proxy_websocket(
         .ok_or(StatusCode::BAD_REQUEST)?
         .to_string();
     let response_key = websocket_accept_key(&sec_key);
-    let protocol = request
-        .headers()
-        .get("sec-websocket-protocol")
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
 
     let mut builder = Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -179,7 +166,6 @@ async fn proxy_websocket(
     }
 
     let on_upgrade = hyper::upgrade::on(&mut request);
-    let ingress_scheme = state.ingress_scheme.clone();
     tokio::spawn(async move {
         if let Ok(upgraded) = on_upgrade.await {
             let _ = relay_websocket(
@@ -290,55 +276,77 @@ fn copy_headers(
     request
 }
 
-fn upstream_path(
-    conn: &rusqlite::Connection,
-    route: &crate::model::RouteRecord,
-    _service: &crate::model::ServiceRecord,
-    host: &str,
+fn ingress_plan(
+    state: &ProxyState,
+    headers: &HeaderMap,
     uri: &axum::http::Uri,
-) -> anyhow::Result<String> {
-    let path = uri.path();
-    if path == "/_megaserver/signed" {
-        let secret = state::secret_value(conn, &route.service_name, "MEGASERVER_SIGNING_KEY")?
-            .ok_or_else(|| anyhow::anyhow!("signed links are not enabled for this service"))?;
-        return crate::ingress::resolve_signed_target(
-            &secret,
-            host,
-            &route.service_name,
-            uri.query(),
-        );
-    }
-    Ok(uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/")
-        .to_string())
+    host: &str,
+) -> Result<ProxyPlan, StatusCode> {
+    let value = controlplane::dispatch_ingress_raw(
+        &state.paths.home,
+        host,
+        uri.path(),
+        uri.query(),
+        &state.ingress_scheme,
+        header_value(headers, "upgrade"),
+        header_value(headers, "connection"),
+        header_value(headers, "sec-websocket-protocol"),
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    proxy_plan_from_value(value)
 }
 
-fn map_ingress_error(err: anyhow::Error) -> StatusCode {
-    let message = err.to_string();
-    if message.contains("expired")
-        || message.contains("signature")
-        || message.contains("enabled")
-        || message.contains("missing signed-link")
-    {
-        return StatusCode::UNAUTHORIZED;
+fn proxy_plan_from_value(value: Value) -> Result<ProxyPlan, StatusCode> {
+    if value.get("status").and_then(Value::as_str) != Some("ok") {
+        let status = value
+            .get("http_status")
+            .and_then(Value::as_u64)
+            .and_then(|raw| u16::try_from(raw).ok())
+            .and_then(|raw| StatusCode::from_u16(raw).ok())
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+        return Err(status);
     }
-    StatusCode::BAD_REQUEST
+    let upstream_port = value
+        .get("upstream_port")
+        .and_then(Value::as_u64)
+        .and_then(|raw| u16::try_from(raw).ok())
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    Ok(ProxyPlan {
+        proxy_kind: value
+            .get("proxy_kind")
+            .and_then(Value::as_str)
+            .unwrap_or("http")
+            .to_string(),
+        upstream_host: value
+            .get("upstream_host")
+            .and_then(Value::as_str)
+            .ok_or(StatusCode::BAD_GATEWAY)?
+            .to_string(),
+        upstream_port,
+        upstream_path: value
+            .get("upstream_path")
+            .and_then(Value::as_str)
+            .ok_or(StatusCode::BAD_GATEWAY)?
+            .to_string(),
+        forwarded_host: value
+            .get("forwarded_host")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        forwarded_proto: value
+            .get("forwarded_proto")
+            .and_then(Value::as_str)
+            .unwrap_or("http")
+            .to_string(),
+        websocket_protocol: value
+            .get("sec_websocket_protocol")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    })
 }
 
-fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
-    let upgrade = headers
-        .get("upgrade")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false);
-    let connection = headers
-        .get("connection")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase().contains("upgrade"))
-        .unwrap_or(false);
-    upgrade && connection
+fn header_value<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 fn websocket_accept_key(key: &str) -> String {

@@ -72,6 +72,48 @@ pub fn dispatch_http_raw(
     ffi::dispatch_control(&Value::Object(payload))
 }
 
+pub fn dispatch_ingress_raw(
+    home: &PathBuf,
+    host: &str,
+    path: &str,
+    query: Option<&str>,
+    ingress_scheme: &str,
+    upgrade: Option<&str>,
+    connection: Option<&str>,
+    websocket_protocol: Option<&str>,
+) -> Result<Value> {
+    let mut payload = Map::new();
+    payload.insert(
+        "home".to_string(),
+        Value::String(home.display().to_string()),
+    );
+    payload.insert("ingress_host".to_string(), Value::String(host.to_string()));
+    payload.insert("ingress_path".to_string(), Value::String(path.to_string()));
+    payload.insert(
+        "ingress_scheme".to_string(),
+        Value::String(ingress_scheme.to_string()),
+    );
+    if let Some(value) = query {
+        payload.insert(
+            "ingress_query".to_string(),
+            Value::String(value.to_string()),
+        );
+    }
+    if let Some(value) = upgrade {
+        payload.insert("upgrade".to_string(), Value::String(value.to_string()));
+    }
+    if let Some(value) = connection {
+        payload.insert("connection".to_string(), Value::String(value.to_string()));
+    }
+    if let Some(value) = websocket_protocol {
+        payload.insert(
+            "sec_websocket_protocol".to_string(),
+            Value::String(value.to_string()),
+        );
+    }
+    ffi::dispatch_control(&Value::Object(payload))
+}
+
 pub fn require_status_ok(value: Value) -> Result<Value> {
     if value.get("status").and_then(Value::as_str) == Some("error") {
         let message = value

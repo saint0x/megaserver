@@ -15,11 +15,19 @@ fn output_path() -> str {
 }
 
 fn host_input_path() -> str {
-    return "/tmp/megaserver.fzy.host.input.json"
+    let override = env.get("MEGASERVER_FZY_HOST_INPUT")
+    if override != "" {
+        return override
+    }
+    return "/var/tmp/megaserver.fzy.host.input.json"
 }
 
 fn host_output_path() -> str {
-    return "/tmp/megaserver.fzy.host.output.json"
+    let override = env.get("MEGASERVER_FZY_HOST_OUTPUT")
+    if override != "" {
+        return override
+    }
+    return "/var/tmp/megaserver.fzy.host.output.json"
 }
 
 fn error_payload(message: str) -> str {
@@ -74,6 +82,34 @@ fn authorization(raw: str) -> str {
     return string_field(raw, "authorization")
 }
 
+fn ingress_host(raw: str) -> str {
+    return string_field(raw, "ingress_host")
+}
+
+fn ingress_path(raw: str) -> str {
+    return string_field(raw, "ingress_path")
+}
+
+fn ingress_query(raw: str) -> str {
+    return string_field(raw, "ingress_query")
+}
+
+fn ingress_scheme(raw: str) -> str {
+    return string_field(raw, "ingress_scheme")
+}
+
+fn upgrade(raw: str) -> str {
+    return string_field(raw, "upgrade")
+}
+
+fn connection(raw: str) -> str {
+    return string_field(raw, "connection")
+}
+
+fn websocket_protocol(raw: str) -> str {
+    return string_field(raw, "sec_websocket_protocol")
+}
+
 fn home(raw: str) -> str {
     return string_field(raw, "home")
 }
@@ -87,6 +123,9 @@ fn envelope_kind(raw: str) -> str {
     let request_path = path(raw)
     if request_method != "" && request_path != "" {
         return "http"
+    }
+    if ingress_host(raw) != "" && ingress_path(raw) != "" {
+        return "ingress"
     }
     return ""
 }
