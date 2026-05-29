@@ -2,10 +2,14 @@ pub const SANDBOX_SUBNET: &str = "10.42.0.0/24";
 pub const BRIDGE_NAME: &str = "megabr0";
 pub const BRIDGE_CIDR: &str = "10.42.0.254/24";
 pub const BRIDGE_GATEWAY: &str = "10.42.0.254";
+pub const FIREWALL_CHAIN: &str = "MEGASERVER-FORWARD";
+pub const INPUT_CHAIN: &str = "MEGASERVER-INPUT";
 
 #[cfg(target_os = "linux")]
 pub mod linux {
-    use super::{BRIDGE_CIDR, BRIDGE_GATEWAY, BRIDGE_NAME, SANDBOX_SUBNET};
+    use super::{
+        BRIDGE_CIDR, BRIDGE_GATEWAY, BRIDGE_NAME, FIREWALL_CHAIN, INPUT_CHAIN, SANDBOX_SUBNET,
+    };
     use anyhow::{Context, Result, bail};
     use std::collections::hash_map::DefaultHasher;
     use std::fs;
@@ -166,14 +170,42 @@ pub mod linux {
                 .context("enable ipv4 forwarding")?;
 
             let uplink = self.default_uplink_interface()?;
+            self.ensure_iptables_chain(FIREWALL_CHAIN, "FORWARD")?;
+            self.ensure_iptables_chain(INPUT_CHAIN, "INPUT")?;
             self.ensure_iptables_rule(
-                &["-C", "FORWARD", "-i", BRIDGE_NAME, "-j", "ACCEPT"],
-                &["-A", "FORWARD", "-i", BRIDGE_NAME, "-j", "ACCEPT"],
+                &["-C", "FORWARD", "-j", FIREWALL_CHAIN],
+                &["-A", "FORWARD", "-j", FIREWALL_CHAIN],
             )?;
             self.ensure_iptables_rule(
                 &[
                     "-C",
-                    "FORWARD",
+                    FIREWALL_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "-o",
+                    BRIDGE_NAME,
+                    "-j",
+                    "ACCEPT",
+                ],
+                &[
+                    "-A",
+                    FIREWALL_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "-o",
+                    BRIDGE_NAME,
+                    "-j",
+                    "ACCEPT",
+                ],
+            )?;
+            self.ensure_iptables_rule(
+                &["-C", FIREWALL_CHAIN, "-i", BRIDGE_NAME, "-j", "ACCEPT"],
+                &["-A", FIREWALL_CHAIN, "-i", BRIDGE_NAME, "-j", "ACCEPT"],
+            )?;
+            self.ensure_iptables_rule(
+                &[
+                    "-C",
+                    FIREWALL_CHAIN,
                     "-o",
                     BRIDGE_NAME,
                     "-m",
@@ -185,7 +217,7 @@ pub mod linux {
                 ],
                 &[
                     "-A",
-                    "FORWARD",
+                    FIREWALL_CHAIN,
                     "-o",
                     BRIDGE_NAME,
                     "-m",
@@ -195,6 +227,44 @@ pub mod linux {
                     "-j",
                     "ACCEPT",
                 ],
+            )?;
+            self.ensure_iptables_rule(
+                &["-C", FIREWALL_CHAIN, "-d", SANDBOX_SUBNET, "-j", "DROP"],
+                &["-A", FIREWALL_CHAIN, "-d", SANDBOX_SUBNET, "-j", "DROP"],
+            )?;
+            self.ensure_iptables_rule(
+                &["-C", "INPUT", "-j", INPUT_CHAIN],
+                &["-A", "INPUT", "-j", INPUT_CHAIN],
+            )?;
+            self.ensure_iptables_rule(
+                &[
+                    "-C",
+                    INPUT_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "-p",
+                    "udp",
+                    "--dport",
+                    "53",
+                    "-j",
+                    "ACCEPT",
+                ],
+                &[
+                    "-A",
+                    INPUT_CHAIN,
+                    "-i",
+                    BRIDGE_NAME,
+                    "-p",
+                    "udp",
+                    "--dport",
+                    "53",
+                    "-j",
+                    "ACCEPT",
+                ],
+            )?;
+            self.ensure_iptables_rule(
+                &["-C", INPUT_CHAIN, "-i", BRIDGE_NAME, "-j", "RETURN"],
+                &["-A", INPUT_CHAIN, "-i", BRIDGE_NAME, "-j", "RETURN"],
             )?;
             self.ensure_iptables_rule(
                 &[
@@ -235,6 +305,11 @@ pub mod linux {
                 self.runner.run("iptables", add_args)?;
             }
             Ok(())
+        }
+
+        fn ensure_iptables_chain(&self, chain: &str, parent: &str) -> Result<()> {
+            let _ = self.runner.run("iptables", &["-N", chain]);
+            self.ensure_iptables_rule(&["-C", parent, "-j", chain], &["-A", parent, "-j", chain])
         }
 
         fn ip(&self, args: &[&str]) -> Result<String> {
@@ -367,12 +442,36 @@ pub mod linux {
                     Ok("default via 172.17.0.1 dev eth0 proto dhcp src 172.17.0.2"),
                 )
                 .with_output(
-                    "iptables -C FORWARD -i megabr0 -j ACCEPT",
-                    Err("missing forward rule"),
+                    "iptables -C FORWARD -j MEGASERVER-FORWARD",
+                    Err("missing forward jump"),
                 )
                 .with_output(
-                    "iptables -C FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+                    "iptables -C MEGASERVER-FORWARD -i megabr0 -o megabr0 -j ACCEPT",
+                    Err("missing east-west rule"),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-FORWARD -i megabr0 -j ACCEPT",
+                    Err("missing outbound rule"),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
                     Err("missing established rule"),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-FORWARD -d 10.42.0.0/24 -j DROP",
+                    Err("missing drop rule"),
+                )
+                .with_output(
+                    "iptables -C INPUT -j MEGASERVER-INPUT",
+                    Err("missing input jump"),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-INPUT -i megabr0 -p udp --dport 53 -j ACCEPT",
+                    Err("missing dns rule"),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-INPUT -i megabr0 -j RETURN",
+                    Err("missing return rule"),
                 )
                 .with_output(
                     "iptables -t nat -C POSTROUTING -s 10.42.0.0/24 -o eth0 -j MASQUERADE",
@@ -385,10 +484,26 @@ pub mod linux {
             let calls = runner.calls();
             assert!(calls.contains(&"ip link add megabr0 type bridge".to_string()));
             assert!(calls.contains(&"ip addr replace 10.42.0.254/24 dev megabr0".to_string()));
-            assert!(calls.contains(&"iptables -A FORWARD -i megabr0 -j ACCEPT".to_string()));
             assert!(calls.contains(
-                &"iptables -A FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT".to_string()
+                &"iptables -A MEGASERVER-FORWARD -i megabr0 -o megabr0 -j ACCEPT".to_string()
             ));
+            assert!(
+                calls.contains(&"iptables -A MEGASERVER-FORWARD -i megabr0 -j ACCEPT".to_string())
+            );
+            assert!(calls.contains(
+                &"iptables -A MEGASERVER-FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT".to_string()
+            ));
+            assert!(
+                calls.contains(
+                    &"iptables -A MEGASERVER-FORWARD -d 10.42.0.0/24 -j DROP".to_string()
+                )
+            );
+            assert!(calls.contains(
+                &"iptables -A MEGASERVER-INPUT -i megabr0 -p udp --dport 53 -j ACCEPT".to_string()
+            ));
+            assert!(
+                calls.contains(&"iptables -A MEGASERVER-INPUT -i megabr0 -j RETURN".to_string())
+            );
             assert!(calls.contains(
                 &"iptables -t nat -A POSTROUTING -s 10.42.0.0/24 -o eth0 -j MASQUERADE".to_string()
             ));
@@ -409,11 +524,35 @@ pub mod linux {
                     Ok("default via 172.17.0.1 dev eth0 proto dhcp src 172.17.0.2"),
                 )
                 .with_output(
-                    "iptables -C FORWARD -i megabr0 -j ACCEPT",
+                    "iptables -C FORWARD -j MEGASERVER-FORWARD",
                     Ok(""),
                 )
                 .with_output(
-                    "iptables -C FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+                    "iptables -C MEGASERVER-FORWARD -i megabr0 -o megabr0 -j ACCEPT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-FORWARD -i megabr0 -j ACCEPT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-FORWARD -o megabr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-FORWARD -d 10.42.0.0/24 -j DROP",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C INPUT -j MEGASERVER-INPUT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-INPUT -i megabr0 -p udp --dport 53 -j ACCEPT",
+                    Ok(""),
+                )
+                .with_output(
+                    "iptables -C MEGASERVER-INPUT -i megabr0 -j RETURN",
                     Ok(""),
                 )
                 .with_output(

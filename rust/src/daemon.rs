@@ -408,6 +408,7 @@ async fn reconcile_loop(state: Arc<DaemonState>) {
 async fn reconcile_once(state: &Arc<DaemonState>) -> Result<()> {
     let conn = state::open(&state.paths)?;
     let services = state::list_services(&conn)?;
+    let sandboxes = state::list_sandboxes(&conn)?;
     drop(conn);
     for service in services {
         if let Some(pid) = service.pid {
@@ -467,6 +468,34 @@ async fn reconcile_once(state: &Arc<DaemonState>) -> Result<()> {
                     state::update_service_status(&conn, &service.name, next, Some(pid))?;
                 }
             }
+        }
+    }
+    for sandbox in sandboxes {
+        let stale = sandbox
+            .pid
+            .is_none_or(|pid| !crate::runtime::process_alive(pid));
+        if sandbox.runtime_kind == "linux-namespace" && stale && sandbox.status != "stopped" {
+            let conn = state::open(&state.paths)?;
+            crate::sandbox::cleanup_sandbox(&crate::sandbox::SandboxLaunchMetadata {
+                service_name: Some(sandbox.service_name.clone()),
+                runtime_kind: sandbox.runtime_kind.clone(),
+                isolation_mode: sandbox.isolation_mode.clone(),
+                cgroup_path: sandbox.cgroup_path.clone(),
+            })?;
+            state::upsert_sandbox(
+                &conn,
+                state::SandboxUpsert {
+                    service_name: &sandbox.service_name,
+                    sandbox_id: &sandbox.sandbox_id,
+                    hostname: &sandbox.hostname,
+                    ip_address: sandbox.ip_address.as_deref(),
+                    runtime_kind: &sandbox.runtime_kind,
+                    isolation_mode: &sandbox.isolation_mode,
+                    status: "stopped",
+                    pid: None,
+                    cgroup_path: None,
+                },
+            )?;
         }
     }
     crate::dns::stop_if_idle(&state.paths)?;
